@@ -1,0 +1,104 @@
+name: dbt-airflow
+version: '3'
+
+x-airflow-common: &airflow-common
+  build: 
+    context: ..
+    dockerfile: docker/Dockerfile
+    target: dev
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@${POSTGRES_HOST:-postgres}/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    # Added recommended settings
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__ENABLE_XCOM_PICKLING: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'false'
+    AIRFLOW_HOME: /opt/airflow
+    # DBT settings
+    DBT_PROFILES_DIR: /opt/airflow/dbt
+    DBT_PROJECT_DIR: /opt/airflow/dbt
+    POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+    POSTGRES_USER: ${POSTGRES_USER:-airflow}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+    POSTGRES_DB: ${POSTGRES_DB:-airflow}    
+  volumes:
+    - ../airflow/dags:/opt/airflow/dags
+    - ../airflow/logs:/opt/airflow/logs
+    - ../airflow/plugins:/opt/airflow/plugins
+    - ../airflow/dbt:/opt/airflow/dbt
+  depends_on:
+    postgres:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "nc", "-z", "postgres", "5432"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - dbt-airflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  init:
+    <<: *airflow-common
+    command: |
+      bash -c '
+        airflow db init && \
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin
+      '
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure:3
+    
+  webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+        
+  scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--hostname", "scheduler"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+        
+volumes:
+  dbt-airflow-postgres:

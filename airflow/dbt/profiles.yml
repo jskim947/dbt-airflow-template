@@ -1,0 +1,12 @@
+example_dbt:  # this should match the profile name in your dbt_project.yml
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'postgres') }}"
+      user: "{{ env_var('POSTGRES_USER', 'airflow') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}"
+      port: 5432
+      dbname: "{{ env_var('POSTGRES_DB', 'airflow') }}"
+      schema: example_dbt
+      threads: 4
