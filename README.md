@@ -1,3 +1,4 @@
+
 # dbt-airflow-template
 
 This template provides a production-ready setup for running dbt with
@@ -45,6 +46,32 @@ dbt-airflow-template/
 ```
 
 ## Development Workflow
+
+### Initial Setup
+
+1. Create a new repository from this template
+2. Clone your new repository
+3. Initialize the development environment:
+```bash
+make init        # Create virtual environment and install dependencies
+make docker-up   # Start all services
+```
+
+### Code Quality
+
+This template includes several code quality tools:
+
+- pre-commit hooks for automated checks
+- ruff for Python linting and formatting
+- mypy for static type checking
+
+To run code quality checks manually:
+```bash
+make pre-commit              # Run all pre-commit checks
+make pre-commit-upgrade      # Update pre-commit hooks to latest versions
+```
+
+The checks will also run automatically on `git commit`.
 
 ### Local Development
 
@@ -137,10 +164,15 @@ make docker-push DOCKER_REGISTRY=your-registry DOCKER_PACKAGE=your-package DOCKE
 
 ## Contributing
 
-1. Create a feature branch
+1. Create a feature branch or fork
 2. Make your changes
-3. Test thoroughly
-4. Submit a pull request
+3. Ensure all code quality checks pass:
+   ```bash
+   make pre-commit
+   ```
+4. Test thoroughly: at a minimum `make docker-up`should build, run, and example workflow should start (which
+   will fail by design). See [docs/example-workflow.md](docs/example-workflow.md) for more info.
+5. Submit a pull request
 
 ## License
 

@@ -7,24 +7,44 @@ ifneq (,$(wildcard .env))
 endif
 
 # Virtual environment settings
-VENV_NAME := .venv
-PYTHON := $(VENV_NAME)/bin/python
-UV := $(VENV_NAME)/bin/uv
-DBT := $(VENV_NAME)/bin/dbt
+VENV := .venv
+PYTHON := $(VENV)/bin/python
+UV := $(VENV)/bin/uv
+PRE_COMMIT := $(VENV)/bin/pre-commit
+DBT := $(VENV)/bin/dbt
+
+# Docker settings
 DOCKER := BUILDKIT_PROGRESS=plain docker
-DOCKER_COMPOSE := $(DOCKER) compose --progress=plain -f docker/docker-compose.yml
+UID := $(shell id -u)
+DOCKER_COMPOSE := UID=$(UID) $(DOCKER) compose --ansi never --progress=plain -f docker/docker-compose.yml
 PACKAGE ?= $(if $(DOCKER_PACKAGE),$(DOCKER_PACKAGE),dbt-airflow)
 TAG ?= $(if $(DOCKER_TAG),$(DOCKER_TAG),latest)
 REGISTRY ?= $(if $(DOCKER_REGISTRY),$(DOCKER_REGISTRY)/,)
 
-init:
-	python -m venv $(VENV_NAME)
+$(VENV)/bin/uv:
+	python -m venv $(VENV)
 	$(PYTHON) -m pip install --quiet uv
-	$(UV) pip install --no-progress -e .
+
+install: $(VENV)/bin/uv
+	$(UV) pip install --quiet --editable .
+	$(UV) pip install --quiet pre-commit
+	$(PRE_COMMIT) install
 	mkdir -p airflow/logs
 
-# Even though this is built we don't clean it
-# and we commit as pinned Dockerfile config
+install-dev: install
+	$(UV) pip install --quiet --editable ".[dev]"
+
+install-emacs: install-dev
+	$(UV) pip install --quiet --editable ".[emacs]"
+
+pre-commit: $(VENV)/bin/pre-commit
+	$(PRE_COMMIT) run --all-files
+
+pre-commit-upgrade: $(VENV)/bin/pre-commit
+	$(PRE_COMMIT) autoupdate
+
+# Although docker/requirements.txt is generated we commit
+# it as a locked pip install for the container
 docker/requirements.txt: pyproject.toml
 	$(UV) pip compile -q pyproject.toml -o $@
 
