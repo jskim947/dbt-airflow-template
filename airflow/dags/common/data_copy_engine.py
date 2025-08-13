@@ -88,9 +88,20 @@ class DataCopyEngine:
 
             # DataFrame으로 변환
             if all_data:
-                columns = [
-                    desc[0] for desc in self.source_hook.get_cursor().description
-                ]
+                # 컬럼명을 안전하게 가져오기
+                try:
+                    cursor = self.source_hook.get_cursor()
+                    if cursor and cursor.description:
+                        columns = [desc[0] for desc in cursor.description]
+                    else:
+                        # description이 None인 경우 기본 컬럼명 생성
+                        columns = [f"column_{i}" for i in range(len(all_data[0]))]
+                        logger.warning(f"컬럼 정보를 가져올 수 없어 기본 컬럼명을 사용합니다: {columns}")
+                except Exception as e:
+                    # 컬럼 정보 가져오기 실패 시 기본 컬럼명 생성
+                    columns = [f"column_{i}" for i in range(len(all_data[0]))]
+                    logger.warning(f"컬럼 정보 가져오기 실패, 기본 컬럼명을 사용합니다: {columns}")
+                
                 df = pd.DataFrame(all_data, columns=columns)
 
                 # CSV로 저장
