@@ -1,0 +1,129 @@
+# DBT + Astronomer Cosmos 프로젝트 구조 가이드
+
+## 프로젝트 구조
+
+이 프로젝트는 PostgreSQL 데이터 복사 파이프라인을 위한 dbt + Astronomer Cosmos 통합 환경입니다.
+
+### 핵심 디렉토리 구조
+```
+dbt-airflow-template/
+├── airflow/
+│   ├── dags/                    # Airflow DAG 파일들
+│   │   ├── postgres_data_copy_dag.py    # 메인 데이터 복사 DAG
+│   │   └── dbt_processing_dag.py        # dbt 처리 DAG
+│   ├── dbt/                     # dbt 프로젝트 루트
+│   │   ├── dbt_project.yml      # dbt 프로젝트 설정
+│   │   ├── profiles.yml         # dbt 프로필 설정
+│   │   ├── packages.yml         # dbt 패키지 의존성
+│   │   ├── models/              # dbt 모델
+│   │   ├── snapshots/           # dbt 스냅샷
+│   │   ├── macros/              # dbt 매크로
+│   │   └── tests/               # dbt 테스트
+│   └── plugins/                 # Airflow 플러그인
+```
+
+## DBT 프로젝트 설정
+
+### 핵심 설정 파일
+- [dbt_project.yml](mdc:airflow/dbt/dbt_project.yml): dbt 프로젝트 메타데이터 및 설정
+- [profiles.yml](mdc:airflow/dbt/profiles.yml): 데이터베이스 연결 프로필
+- [packages.yml](mdc:airflow/dbt/packages.yml): 외부 패키지 의존성
+
+### 프로젝트 설정 핵심 내용
+```yaml
+name: 'postgres_data_copy'
+version: '1.0.0'
+profile: 'postgres_data_copy'
+config-version: 2
+require-dbt-version: ">=1.8.0"
+```
+
+## Astronomer Cosmos 통합
+
+### DAG 구조
+- [postgres_data_copy_dag.py](mdc:airflow/dags/postgres_data_copy_dag.py): PostgreSQL 데이터 복사 + dbt 스냅샷 실행
+- [dbt_processing_dag.py](mdc:airflow/dags/dbt_processing_dag.py): Cosmos 기반 dbt DAG
+
+### Cosmos 설정 요구사항
+- `dbt_executable_path`: dbt 실행 파일 경로 설정 필요
+- `project_config`: dbt 프로젝트 경로 설정
+- `profile_config`: 데이터베이스 연결 프로필 설정
+
+## 환경 설정 및 의존성
+
+### 필수 패키지
+- `dbt-postgres`: PostgreSQL 어댑터
+- `astronomer-cosmos`: Cosmos 통합
+- `psycopg2-binary`: PostgreSQL 연결 드라이버
+
+### dbt 패키지 의존성
+```yaml
+packages:
+  - package: dbt-labs/codegen
+  - package: dbt-labs/audit_helper
+  - package: dbt-labs/spark_utils
+```
+
+## 데이터 모델 구조
+
+### 스테이징 모델
+- [stg_infomax_stock_master.sql](mdc:airflow/dbt/models/staging/stg_infomax_stock_master.sql): 인포맥스 종목 마스터 스테이징
+- [schema.yml](mdc:airflow/dbt/models/staging/schema.yml): 모델 스키마 및 테스트 정의
+
+### 스냅샷
+- [infomax_stock_master_snapshot.sql](mdc:airflow/dbt/snapshots/infomax_stock_master_snapshot.sql): SCD2 패턴 구현
+
+### 소스 정의
+- [sources.yml](mdc:airflow/dbt/models/sources.yml): 원본 데이터 소스 정의
+
+## 실행 순서 및 의존성
+
+### dbt 실행 순서
+1. `dbt deps` - 패키지 의존성 설치
+2. `dbt parse` - 프로젝트 파싱 및 검증
+3. `dbt run` - 모델 실행
+4. `dbt snapshot` - 스냅샷 생성
+5. `dbt test` - 데이터 품질 테스트
+
+### Airflow DAG 실행 순서
+1. PostgreSQL 데이터 복사
+2. dbt 스냅샷 실행
+3. 데이터 무결성 검증
+4. 결과 로깅 및 알림
+
+## 주의사항 및 제약사항
+
+### dbt 프로젝트 설정
+- `config-version: 2` 필수 (dbt 1.0+ 호환성)
+- 프로젝트 이름은 `dbt_project.yml`과 `profiles.yml`에서 일치해야 함
+- 스키마 경로는 `profiles.yml`의 `schema` 설정과 일치해야 함
+
+### Cosmos 통합 시 고려사항
+- `DagBag import timeout` 오류 방지를 위한 `core.dagbag_import_timeout` 설정 증가
+- dbt 프로젝트 경로는 Airflow 컨테이너 내부 경로로 설정
+- 가상환경 사용 시 `dbt_executable_path` 정확한 경로 설정 필요
+
+### 데이터베이스 연결
+- 소스: `fs2_postgres` 연결 (팩셋 데이터베이스)
+- 타겟: `postgres_default` 연결 (Airflow PostgreSQL)
+- 스냅샷: `snapshots` 스키마에 저장
+
+## 문제 해결 가이드
+
+### 일반적인 오류
+1. **Parsing Error**: `dbt_project.yml` 설정 검증 필요
+2. **Connection Error**: `profiles.yml` 연결 정보 확인
+3. **Import Timeout**: Cosmos DAG 로딩 시간 증가 설정
+4. **Schema Mismatch**: 소스/타겟 스키마 일치성 확인
+
+### 디버깅 명령어
+```bash
+dbt debug      # 프로젝트 설정 검증
+dbt parse      # 프로젝트 파싱 테스트
+dbt deps       # 의존성 설치 상태 확인
+dbt run --dry-run  # 모델 실행 시뮬레이션
+```
+description:
+globs:
+alwaysApply: false
+---

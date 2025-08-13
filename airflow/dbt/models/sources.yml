@@ -1,0 +1,167 @@
+version: 2
+
+sources:
+  - name: raw_data
+    description: "Raw data tables copied from source database"
+    tables:
+      - name: users
+        description: "User information table"
+        columns:
+          - name: id
+            description: "Primary key for users"
+            data_tests:
+              - unique
+              - not_null
+          - name: username
+            description: "Unique username"
+            data_tests:
+              - not_null
+          - name: email
+            description: "User email address"
+            data_tests:
+              - not_null
+          - name: first_name
+            description: "User first name"
+          - name: last_name
+            description: "User last name"
+          - name: created_at
+            description: "Record creation timestamp"
+            data_tests:
+              - not_null
+          - name: updated_at
+            description: "Record update timestamp"
+
+      - name: orders
+        description: "Customer orders table"
+        columns:
+          - name: order_id
+            description: "Primary key for orders"
+            data_tests:
+              - unique
+              - not_null
+          - name: user_id
+            description: "Foreign key to users table"
+            data_tests:
+              - not_null
+          - name: order_date
+            description: "Date when order was placed"
+            data_tests:
+              - not_null
+          - name: total_amount
+            description: "Total order amount"
+            data_tests:
+              - not_null
+          - name: status
+            description: "Order status"
+            data_tests:
+              - not_null
+          - name: created_at
+            description: "Record creation timestamp"
+            data_tests:
+              - not_null
+          - name: updated_at
+            description: "Record update timestamp"
+
+      - name: products
+        description: "Product catalog table"
+        columns:
+          - name: product_id
+            description: "Primary key for products"
+            data_tests:
+              - unique
+              - not_null
+          - name: name
+            description: "Product name"
+            data_tests:
+              - not_null
+          - name: description
+            description: "Product description"
+          - name: price
+            description: "Product price"
+            data_tests:
+              - not_null
+          - name: category
+            description: "Product category"
+          - name: stock_quantity
+            description: "Available stock quantity"
+            data_tests:
+              - not_null
+          - name: created_at
+            description: "Record creation timestamp"
+            data_tests:
+              - not_null
+          - name: updated_at
+            description: "Record update timestamp"
+
+      - name: order_items
+        description: "Individual items within orders"
+        columns:
+          - name: item_id
+            description: "Primary key for order items"
+            data_tests:
+              - unique
+              - not_null
+          - name: order_id
+            description: "Foreign key to orders table"
+            data_tests:
+              - not_null
+          - name: product_id
+            description: "Foreign key to products table"
+            data_tests:
+              - not_null
+          - name: quantity
+            description: "Quantity ordered"
+            data_tests:
+              - not_null
+          - name: unit_price
+            description: "Price per unit"
+            data_tests:
+              - not_null
+          - name: total_price
+            description: "Total price for this item"
+            data_tests:
+              - not_null
+          - name: created_at
+            description: "Record creation timestamp"
+            data_tests:
+              - not_null
+          - name: updated_at
+            description: "Record update timestamp"
+
+      - name: 인포맥스종목마스터
+        description: "인포맥스 종목 마스터 테이블"
+        columns:
+          - name: 인포맥스코드
+            description: "인포맥스 종목 코드"
+            data_tests:
+              - not_null
+          - name: 팩셋거래소
+            description: "팩셋 거래소 코드"
+            data_tests:
+              - not_null
+          - name: gts_exnm
+            description: "GTS 거래소명"
+            data_tests:
+              - not_null
+          - name: 티커
+            description: "종목 티커"
+            data_tests:
+              - not_null
+          - name: 국가코드
+            description: "국가 코드"
+          - name: isin
+            description: "ISIN 코드"
+          - name: 국문명
+            description: "종목 국문명"
+          - name: 영문명
+            description: "종목 영문명"
+          - name: 일자
+            description: "데이터 기준일자"
+          - name: 종가
+            description: "종가"
+          - name: 상장일
+            description: "상장일"
+          - name: gts_티커
+            description: "GTS 티커"
+          - name: curr
+            description: "통화"

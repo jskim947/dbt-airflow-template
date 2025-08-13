@@ -1,36 +1,37 @@
-
-# Name your project! Project names should contain only lowercase characters
-# and underscores. A good package name should reflect your organization's
-# name or the intended use of these models
-name: 'example_dbt'
+name: 'postgres_data_copy'
 version: '1.0.0'
 
-# This setting configures which "profile" dbt uses for this project.
-profile: 'example_dbt'
+profile: 'postgres_data_copy'
 
-# These configurations specify where dbt should look for different types of files.
-# The `model-paths` config, for example, states that models in this project can be
-# found in the "models/" directory. You probably won't need to change these!
 model-paths: ["models"]
-analysis-paths: ["analyses"]
-test-paths: ["tests"]
-seed-paths: ["seeds"]
-macro-paths: ["macros"]
 snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+macro-paths: ["macros"]
 
-clean-targets:         # directories to be removed by `dbt clean`
-  - "target"
-  - "dbt_packages"
+# dbt 버전 호환성 설정
+require-dbt-version: ">=1.8.0"
 
+# 프로젝트 설정
+config-version: 2
 
-# Configuring models
-# Full documentation: https://docs.getdbt.com/docs/configuring-models
-
-# In this example config, we tell dbt to build all models in the example/
-# directory as views. These settings can be overridden in the individual model
-# files using the `{{ config(...) }}` macro.
+# 모델 설정
 models:
-  example_dbt:
-    # Config indicated by + and applies to all files under models/example/
-    example:
+  postgres_data_copy:
+    staging:
       +materialized: view
+      +schema: staging
+      +tags: ["staging"]
+    marts:
+      +materialized: table
+      +schema: marts
+      +tags: ["marts"]
+
+# 스냅샷 설정 - PostgreSQL 호환성 개선
+snapshots:
+  postgres_data_copy:
+    +target_schema: snapshots
+    +tags: ["snapshots"]
+    +materialized: snapshot
+    +strategy: check

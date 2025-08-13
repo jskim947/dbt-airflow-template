@@ -7,7 +7,7 @@ x-airflow-common: &airflow-common
     target: dev
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@${POSTGRES_HOST:-postgres}/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@${POSTGRES_HOST:-10.150.2.150}/${POSTGRES_DB:-airflow}
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     # Added recommended settings
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
@@ -17,7 +17,7 @@ x-airflow-common: &airflow-common
     # DBT settings
     DBT_PROFILES_DIR: /opt/airflow/dbt
     DBT_PROJECT_DIR: /opt/airflow/dbt
-    POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+    POSTGRES_HOST: 10.150.2.150
     POSTGRES_USER: ${POSTGRES_USER:-airflow}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
     POSTGRES_DB: ${POSTGRES_DB:-airflow}
@@ -99,6 +99,18 @@ services:
         condition: service_healthy
       init:
         condition: service_completed_successfully
+
+  nginx-docs:
+    image: nginx:alpine
+    ports:
+      - "8081:80"
+    volumes:
+      - ../airflow/dbt/target:/usr/share/nginx/html
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   dbt-airflow-postgres:

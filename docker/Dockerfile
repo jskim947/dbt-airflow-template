@@ -19,6 +19,9 @@ COPY --chown=airflow:root docker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && rm requirements.txt
 
+# Verify dbt installation
+RUN dbt --version
+
 # Development stage for live mounting
 FROM base as dev
 # Keep this empty for development purposes
