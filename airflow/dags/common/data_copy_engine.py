@@ -96,12 +96,16 @@ class DataCopyEngine:
                     else:
                         # description이 None인 경우 기본 컬럼명 생성
                         columns = [f"column_{i}" for i in range(len(all_data[0]))]
-                        logger.warning(f"컬럼 정보를 가져올 수 없어 기본 컬럼명을 사용합니다: {columns}")
-                except Exception as e:
+                        logger.warning(
+                            f"컬럼 정보를 가져올 수 없어 기본 컬럼명을 사용합니다: {columns}"
+                        )
+                except Exception:
                     # 컬럼 정보 가져오기 실패 시 기본 컬럼명 생성
                     columns = [f"column_{i}" for i in range(len(all_data[0]))]
-                    logger.warning(f"컬럼 정보 가져오기 실패, 기본 컬럼명을 사용합니다: {columns}")
-                
+                    logger.warning(
+                        f"컬럼 정보 가져오기 실패, 기본 컬럼명을 사용합니다: {columns}"
+                    )
+
                 df = pd.DataFrame(all_data, columns=columns)
 
                 # CSV로 저장
@@ -304,10 +308,9 @@ class DataCopyEngine:
                     );
 
                     -- 새 데이터 삽입
-                    INSERT INTO {target_table} ({pk_columns}, "
-                    f"{', '.join(non_pk_column_names)}) "
-                    f"SELECT {pk_columns}, {', '.join(non_pk_column_names)} "
-                    f"FROM {source_table};
+                    INSERT INTO {target_table} ({pk_columns}, {', '.join(non_pk_column_names)})
+                    SELECT {pk_columns}, {', '.join(non_pk_column_names)}
+                    FROM {source_table};
 
                     COMMIT;
                 """
@@ -318,10 +321,9 @@ class DataCopyEngine:
                 )
 
                 merge_sql = f"""
-                                    INSERT INTO {target_table} ({pk_columns}, "
-                f"{', '.join(non_pk_column_names)}) "
-                f"SELECT {pk_columns}, {', '.join(non_pk_column_names)} "
-                f"FROM {source_table}"
+                    INSERT INTO {target_table} ({pk_columns}, {', '.join(non_pk_column_names)})
+                    SELECT {pk_columns}, {', '.join(non_pk_column_names)}
+                    FROM {source_table}
                     ON CONFLICT ({pk_columns})
                     DO UPDATE SET {update_set_clause};
                 """
