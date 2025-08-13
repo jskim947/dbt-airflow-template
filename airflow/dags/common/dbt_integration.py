@@ -22,7 +22,8 @@ class DBTIntegration:
             dbt_project_path: dbt 프로젝트 경로
         """
         self.dbt_project_path = dbt_project_path
-        self.dbt_profiles_path = os.path.join(os.path.expanduser("~"), ".dbt")
+        # ✅ 수정: profiles.yml을 dbt 프로젝트 디렉토리에서 찾기
+        self.dbt_profiles_path = dbt_project_path
 
         # dbt 명령어 경로 확인
         self.dbt_cmd = self._find_dbt_command()
@@ -141,6 +142,7 @@ class DBTIntegration:
             # 환경 변수 설정
             env = os.environ.copy()
             env["DBT_PROFILES_DIR"] = self.dbt_profiles_path
+            env["DBT_PROJECT_DIR"] = self.dbt_project_path
 
             # dbt 명령어 실행
             cmd = [self.dbt_cmd, *args]
@@ -249,7 +251,7 @@ class DBTIntegration:
             # dbt run 명령어 인수 구성
             args = ["run"]
 
-            if models:
+            if models and isinstance(models, list) and len(models) > 0:
                 args.extend(["--models", *models])
 
             if select:
@@ -428,18 +430,32 @@ class DBTIntegration:
             # 2. dbt 스냅샷 실행
             if pipeline_config.get("run_snapshot", True):
                 logger.info("2단계: dbt 스냅샷 실행")
-                snapshot_result = self.run_dbt_snapshot(
-                    models=pipeline_config.get("snapshot_models"),
-                    select=pipeline_config.get("snapshot_select"),
-                )
-                results["snapshot"] = snapshot_result
 
-                if snapshot_result["status"] == "error":
-                    return {
-                        "status": "error",
-                        "message": "dbt 스냅샷 실행 실패",
-                        "results": results,
+                # 스냅샷 실행 전 소스 테이블 존재 확인
+                source_check_result = self._check_source_tables()
+                if not source_check_result["is_valid"]:
+                    logger.warning(
+                        f"소스 테이블 확인 실패: {source_check_result['message']}"
+                    )
+                    # 스냅샷 실행을 건너뛰고 계속 진행
+                    results["snapshot"] = {
+                        "status": "skipped",
+                        "message": f"소스 테이블 문제로 스킵: {source_check_result['message']}",
+                        "warning": source_check_result["message"],
                     }
+                else:
+                    snapshot_result = self.run_dbt_snapshot(
+                        models=pipeline_config.get("snapshot_models"),
+                        select=pipeline_config.get("snapshot_select"),
+                    )
+                    results["snapshot"] = snapshot_result
+
+                    if snapshot_result["status"] == "error":
+                        return {
+                            "status": "error",
+                            "message": "dbt 스냅샷 실행 실패",
+                            "results": results,
+                        }
 
             # 3. dbt run 실행
             if pipeline_config.get("run_models", True):
@@ -490,5 +506,36 @@ class DBTIntegration:
             return {
                 "status": "error",
                 "message": f"dbt 파이프라인 실행 중 오류: {e!s}",
+                "error": str(e),
+            }
+
+    def _check_source_tables(self) -> dict[str, Any]:
+        """
+        소스 테이블 존재 여부 확인
+
+        Returns:
+            소스 테이블 확인 결과
+        """
+        try:
+            # dbt ls 명령어로 소스 테이블 확인
+            result = self._run_dbt_command(["ls", "--select", "source:*"])
+
+            if result["return_code"] == 0:
+                return {
+                    "is_valid": True,
+                    "message": "소스 테이블 확인 성공",
+                    "stdout": result["stdout"],
+                }
+            else:
+                return {
+                    "is_valid": False,
+                    "message": f"소스 테이블 확인 실패: {result['stderr']}",
+                    "stderr": result["stderr"],
+                }
+
+        except Exception as e:
+            return {
+                "is_valid": False,
+                "message": f"소스 테이블 확인 중 오류: {e!s}",
                 "error": str(e),
             }

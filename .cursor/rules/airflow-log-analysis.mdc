@@ -1,0 +1,146 @@
+# 에어플로우 로그 분석 및 dbt 태그 기반 실행 가이드
+
+## 에어플로우 로그 분석 방법
+
+### 1. 로그 위치 확인
+```bash
+# DAG별 로그 디렉토리
+airflow/logs/dag_id=DAG명/run_id=실행ID/task_id=태스크명/
+
+# 최신 실행 로그 확인
+ls -la airflow/logs/dag_id=postgres_multi_table_copy_refactored/
+```
+
+### 2. 로그 파일 분석
+```bash
+# 태스크 실행 로그
+cat airflow/logs/dag_id=DAG명/run_id=실행ID/task_id=태스크명/attempt=1.log
+
+# 에러 발생 지점 찾기
+grep -n "ERROR\|Exception\|Traceback" attempt=1.log
+```
+
+### 3. 주요 로그 패턴
+- `INFO`: 정상 실행 정보
+- `WARNING`: 경고 메시지
+- `ERROR`: 오류 발생
+- `[CHECKPOINT]`: 체크포인트 정보
+- `[ERROR]`: 사용자 정의 오류
+
+## dbt 태그 기반 실행 시스템
+
+### 태그 시스템 개요
+dbt에서는 태그를 사용하여 모델을 그룹화하고 선택적으로 실행할 수 있습니다.
+
+### 현재 프로젝트 태그 체계
+- `business`: 비즈니스 로직 모델
+- `production`: 프로덕션 환경 모델
+- `infomax`: 인포맥스 관련 모델
+- `future`: 향후 개발 예정 모델
+- `development`: 개발 중인 모델
+
+### 태그 기반 모델 실행
+```bash
+# 특정 태그의 모델만 실행
+dbt run --select tag:infomax
+
+# 여러 태그 조합
+dbt run --select tag:infomax+tag:production
+
+# 태그 제외
+dbt run --exclude tag:development
+```
+
+### 스냅샷 선택적 실행
+```bash
+# 특정 태그의 스냅샷만 실행
+dbt snapshot --select tag:infomax
+```
+
+## 모델 태그 설정 방법
+
+### 개별 모델 파일에서
+```sql
+{{
+    config(
+        materialized='table',
+        schema='business',
+        tags=['business', 'production', 'infomax']
+    )
+}}
+```
+
+### dbt_project.yml에서 그룹별 설정
+```yaml
+models:
+  postgres_data_copy:
+    business:
+      +tags: ["business", "production", "infomax"]
+      +enabled: true
+```
+
+## Airflow에서 태그 기반 실행
+
+### DAG 설정
+```python
+pipeline_config = {
+    "run_snapshot": True,
+    "run_models": True,
+    "snapshot_select": "tag:infomax",
+    "run_select": "tag:infomax",
+}
+```
+
+## 태그 네이밍 컨벤션
+
+### 비즈니스 도메인
+- `infomax`: 인포맥스 데이터
+- `stock`: 주식 관련 데이터
+- `market`: 시장 데이터
+
+### 환경 구분
+- `production`: 프로덕션 환경
+- `development`: 개발 환경
+
+### 모델 유형
+- `dimension`: 차원 테이블
+- `fact`: 팩트 테이블
+- `staging`: 스테이징 모델
+
+## 모범 사례
+
+### 1. 태그는 명확하고 일관성 있게
+```sql
++tags: ["business", "production", "infomax", "dimension"]
+```
+
+### 2. 계층적 태그 구조 사용
+```sql
++tags: ["business", "infomax", "stock_master"]
+```
+
+### 3. 환경별 태그 분리
+```sql
+# 프로덕션 모델
++tags: ["production", "infomax"]
+
+# 개발 중인 모델
++tags: ["development", "new_feature"]
+```
+
+## 문제 해결
+
+### 태그가 인식되지 않는 경우
+1. `dbt parse` 실행하여 프로젝트 재파싱
+2. 태그 문법 확인 (대소문자, 특수문자)
+3. dbt_project.yml 설정 확인
+
+### 태그 기반 실행이 실패하는 경우
+1. `dbt ls --select tag:태그명`으로 모델 확인
+2. 태그가 올바르게 설정되었는지 확인
+3. 모델이 enabled: true로 설정되었는지 확인
+
+## 참고 문서
+- [dbt Node Selection Syntax](https://docs.getdbt.com/reference/node-selection/syntax)
+- [dbt Tags Documentation](https://docs.getdbt.com/reference/resource-configs/tags)
+- [Airflow + dbt Best Practices](https://docs.getdbt.com/guides/orchestration/airflow-and-dbt-cloud)

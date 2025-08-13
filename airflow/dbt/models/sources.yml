@@ -129,7 +129,7 @@ sources:
             description: "Record update timestamp"
 
       - name: 인포맥스종목마스터
-        description: "인포맥스 종목 마스터 테이블"
+        description: "인포맥스 종목 마스터 테이블 (소스)"
         columns:
           - name: 인포맥스코드
             description: "인포맥스 종목 코드"
@@ -147,6 +147,39 @@ sources:
             description: "종목 티커"
             data_tests:
               - not_null
+          - name: 국가코드
+            description: "국가 코드"
+          - name: isin
+            description: "ISIN 코드"
+          - name: 국문명
+            description: "종목 국문명"
+          - name: 영문명
+            description: "종목 영문명"
+          - name: 일자
+            description: "데이터 기준일자"
+          - name: 종가
+            description: "종가"
+          - name: 상장일
+            description: "상장일"
+          - name: gts_티커
+            description: "GTS 티커"
+          - name: curr
+            description: "통화"
+
+  - name: target_data
+    description: "Target data tables in Airflow database"
+    tables:
+      - name: 인포맥스종목마스터
+        description: "인포맥스 종목 마스터 테이블 (타겟 - 복사된 데이터)"
+        columns:
+          - name: 인포맥스코드
+            description: "인포맥스 종목 코드"
+          - name: 팩셋거래소
+            description: "팩셋 거래소 코드"
+          - name: gts_exnm
+            description: "GTS 거래소명"
+          - name: 티커
+            description: "종목 티커"
           - name: 국가코드
             description: "국가 코드"
           - name: isin

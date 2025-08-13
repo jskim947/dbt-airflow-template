@@ -2,8 +2,6 @@
 
 {{
     config(
-      name='infomax_stock_master_snapshot',
-      target_database='airflow',
       target_schema='snapshots',
       unique_key='pk_인포맥스종목마스터',
       strategy='check',

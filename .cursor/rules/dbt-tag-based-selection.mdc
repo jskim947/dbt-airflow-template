@@ -1,0 +1,107 @@
+# dbt 태그 기반 선택적 실행 가이드
+
+## 태그 시스템 개요
+
+dbt에서는 태그를 사용하여 모델을 그룹화하고 선택적으로 실행할 수 있습니다.
+
+## 현재 프로젝트 태그 체계
+
+### 프로덕션 태그
+- `business`: 비즈니스 로직 모델
+- `production`: 프로덕션 환경 모델
+- `infomax`: 인포맥스 관련 모델
+
+### 개발 태그
+- `future`: 향후 개발 예정 모델
+- `development`: 개발 중인 모델
+
+## 태그 기반 모델 실행
+
+### 기본 실행 명령어
+```bash
+# 특정 태그의 모델만 실행
+dbt run --select tag:infomax
+
+# 여러 태그 조합
+dbt run --select tag:infomax+tag:production
+
+# 태그 제외
+dbt run --exclude tag:development
+```
+
+### 스냅샷 선택적 실행
+```bash
+# 특정 태그의 스냅샷만 실행
+dbt snapshot --select tag:infomax
+```
+
+## 모델 태그 설정 방법
+
+### 개별 모델 파일에서
+```sql
+{{
+    config(
+        materialized='table',
+        schema='business',
+        tags=['business', 'production', 'infomax']
+    )
+}}
+```
+
+### dbt_project.yml에서 그룹별 설정
+```yaml
+models:
+  postgres_data_copy:
+    business:
+      +tags: ["business", "production", "infomax"]
+      +enabled: true
+```
+
+## Airflow에서 태그 기반 실행
+
+### DAG 설정
+```python
+pipeline_config = {
+    "run_snapshot": True,
+    "run_models": True,
+    "snapshot_select": "tag:infomax",
+    "run_select": "tag:infomax",
+}
+```
+
+## 태그 네이밍 컨벤션
+
+### 비즈니스 도메인
+- `infomax`: 인포맥스 데이터
+- `stock`: 주식 관련 데이터
+- `market`: 시장 데이터
+
+### 환경 구분
+- `production`: 프로덕션 환경
+- `development`: 개발 환경
+
+### 모델 유형
+- `dimension`: 차원 테이블
+- `fact`: 팩트 테이블
+- `staging`: 스테이징 모델
+
+## 모범 사례
+
+### 1. 태그는 명확하고 일관성 있게
+```sql
++tags: ["business", "production", "infomax", "dimension"]
+```
+
+### 2. 계층적 태그 구조 사용
+```sql
++tags: ["business", "infomax", "stock_master"]
+```
+
+### 3. 환경별 태그 분리
+```sql
+# 프로덕션 모델
++tags: ["production", "infomax"]
+
+# 개발 중인 모델
++tags: ["development", "new_feature"]
+```

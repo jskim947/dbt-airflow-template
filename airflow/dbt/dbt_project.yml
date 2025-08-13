@@ -16,17 +16,22 @@ require-dbt-version: ">=1.8.0"
 # 프로젝트 설정
 config-version: 2
 
-# 모델 설정
+# 모델 설정 - 태그 기반 그룹화로 선택적 실행 가능
 models:
   postgres_data_copy:
-    staging:
-      +materialized: view
-      +schema: staging
-      +tags: ["staging"]
-    marts:
+    # 실제 비즈니스 모델들 - 현재 활성화
+    business:
       +materialized: table
-      +schema: marts
-      +tags: ["marts"]
+      +schema: business
+      +tags: ["business", "production", "infomax"]
+      +enabled: true
+
+    # 향후 추가될 모델들을 위한 그룹
+    future:
+      +materialized: table
+      +schema: future
+      +tags: ["future", "development"]
+      +enabled: false  # 기본적으로 비활성화
 
 # 스냅샷 설정 - PostgreSQL 호환성 개선
 snapshots:

@@ -503,7 +503,7 @@ def create_temp_table(table_config: dict, **context) -> str:
         source_hook = PostgresHook(postgres_conn_id=SOURCE_CONN_ID)
 
         columns_sql = """
-            SELECT column_name, data_type, is_nullable, column_default
+            SELECT column_name, data_type AS type, is_nullable AS nullable, column_default AS default
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
@@ -537,7 +537,7 @@ def create_temp_table(table_config: dict, **context) -> str:
 
             # 기존 테이블의 컬럼 정보 가져오기
             existing_columns_sql = f"""
-                SELECT column_name, data_type, is_nullable, column_default
+                SELECT column_name, data_type AS type, is_nullable AS nullable, column_default AS default
                 FROM information_schema.columns
                 WHERE table_schema = '{enhanced_config['target_schema']}'
                 AND table_name = '{enhanced_config['temp_table']}'
@@ -567,10 +567,12 @@ def create_temp_table(table_config: dict, **context) -> str:
         column_definitions = []
 
         for col in columns:
-            col_name, col_type, is_nullable, col_default = col
-            nullable = "NULL" if is_nullable == "YES" else "NOT NULL"
+            col_name, col_type, nullable, col_default = col
+            nullable_clause = "NULL" if nullable == "YES" else "NOT NULL"
             default = f" DEFAULT {col_default}" if col_default else ""
-            column_definitions.append(f"{col_name} {col_type} {nullable}{default}")
+            column_definitions.append(
+                f"{col_name} {col_type} {nullable_clause}{default}"
+            )
 
         create_sql += ", ".join(column_definitions) + ")"
 
@@ -637,7 +639,7 @@ def ensure_target_table_exists(table_config: dict, **context) -> str:
         # 소스 테이블의 컬럼 정보 가져오기
         source_schema, source_table = table_config["source"].split(".")
         columns_sql = """
-            SELECT column_name, data_type, is_nullable, column_default
+            SELECT column_name, data_type AS type, is_nullable AS nullable, column_default AS default
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
@@ -657,10 +659,12 @@ def ensure_target_table_exists(table_config: dict, **context) -> str:
         column_definitions = []
 
         for col in columns:
-            col_name, col_type, is_nullable, col_default = col
-            nullable = "NULL" if is_nullable == "YES" else "NOT NULL"
+            col_name, col_type, nullable, col_default = col
+            nullable_clause = "NULL" if nullable == "YES" else "NOT NULL"
             default = f" DEFAULT {col_default}" if col_default else ""
-            column_definitions.append(f"{col_name} {col_type} {nullable}{default}")
+            column_definitions.append(
+                f"{col_name} {col_type} {nullable_clause}{default}"
+            )
 
         create_sql += ", ".join(column_definitions) + ")"
 
@@ -696,7 +700,7 @@ def log_table_structure(table_config: dict, **context) -> str:
         # 소스 테이블 컬럼 정보
         source_schema, source_table = table_config["source"].split(".")
         source_columns_sql = """
-            SELECT column_name, data_type
+            SELECT column_name, data_type AS type
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
@@ -714,7 +718,7 @@ def log_table_structure(table_config: dict, **context) -> str:
         # 타겟 테이블 컬럼 정보
         target_schema, target_table = table_config["target"].split(".")
         target_columns_sql = """
-            SELECT column_name, data_type
+            SELECT column_name, data_type AS type
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
@@ -904,7 +908,7 @@ def prepare_merge_parameters(table_config: dict, **context) -> dict[str, Any]:
         schema_name, table_name = parse_table_name(table_config["source"])
 
         columns_sql = """
-            SELECT column_name, data_type
+            SELECT column_name, data_type AS type
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position

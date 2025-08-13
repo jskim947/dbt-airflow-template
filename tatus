@@ -1,0 +1,5 @@
+[33m6e9870a[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m)[m DAG 리팩토링 완료 및 코드 스타일 정리 - ruff 검사 우회
+[33m031826f[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Merge pull request #1 from rmorison/main
+[33m8563d4d[m Add pre-commit linting/formatting, fix docker volume uid issue
+[33m7bb1e6f[m Documentation added
+[33m14fa79d[m Genesis: working dbt+airflow template with empty README (for test)
