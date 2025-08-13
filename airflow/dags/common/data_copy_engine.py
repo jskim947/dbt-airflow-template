@@ -294,6 +294,60 @@ class DataCopyEngine:
 
             non_pk_columns = self.target_hook.get_records(all_columns_query)
             non_pk_column_names = [col[0] for col in non_pk_columns]
+            
+            # non_pk_column_names가 비어있는 경우 처리
+            if not non_pk_column_names:
+                logger.warning(f"비기본키 컬럼이 없습니다. 기본키만 사용하여 MERGE를 수행합니다.")
+                # 기본키만 사용하는 경우
+                if sync_mode == "full_sync":
+                    merge_sql = f"""
+                        BEGIN;
+                        
+                        -- 기존 데이터 삭제
+                        DELETE FROM {target_table}
+                        WHERE ({pk_columns}) IN (
+                            SELECT {pk_columns} FROM {source_table}
+                        );
+                        
+                        -- 새 데이터 삽입 (기본키만)
+                        INSERT INTO {target_table} ({pk_columns})
+                        SELECT {pk_columns}
+                        FROM {source_table};
+                        
+                        COMMIT;
+                    """
+                else:
+                    merge_sql = f"""
+                        INSERT INTO {target_table} ({pk_columns})
+                        SELECT {pk_columns}
+                        FROM {source_table}
+                        ON CONFLICT ({pk_columns})
+                        DO NOTHING;
+                    """
+                
+                # MERGE 실행
+                start_time = pd.Timestamp.now()
+                self.target_hook.run(merge_sql)
+                end_time = pd.Timestamp.now()
+                
+                # 결과 확인
+                source_count = self.db_ops.get_table_row_count(source_table)
+                target_count = self.db_ops.get_table_row_count(target_table)
+                
+                merge_result = {
+                    "source_count": source_count,
+                    "target_count": target_count,
+                    "sync_mode": sync_mode,
+                    "execution_time": (end_time - start_time).total_seconds(),
+                    "status": "success",
+                    "message": (
+                        f"MERGE 완료 (기본키만): {source_table} -> {target_table}, "
+                        f"소스: {source_count}행, 타겟: {target_count}행"
+                    ),
+                }
+                
+                logger.info(merge_result["message"])
+                return merge_result
 
             # MERGE 쿼리 생성
             if sync_mode == "full_sync":
