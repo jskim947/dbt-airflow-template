@@ -94,18 +94,29 @@ class DataCopyEngine:
                     if cursor and cursor.description:
                         columns = [desc[0] for desc in cursor.description]
                     else:
-                        # description이 None인 경우 기본 컬럼명 생성
-                        columns = [f"column_{i}" for i in range(len(all_data[0]))]
-                        logger.warning(
-                            f"컬럼 정보를 가져올 수 없어 기본 컬럼명을 사용합니다: {columns}"
-                        )
-                except Exception:
+                        # description이 None인 경우 실제 테이블 스키마에서 컬럼명 가져오기
+                        schema_query = f"""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_schema = '{schema}' AND table_name = '{table}'
+                            ORDER BY ordinal_position
+                        """
+                        try:
+                            schema_columns = self.source_hook.get_records(schema_query)
+                            if schema_columns:
+                                columns = [col[0] for col in schema_columns]
+                                logger.info(f"스키마에서 컬럼명을 가져왔습니다: {columns}")
+                            else:
+                                columns = [f"column_{i}" for i in range(len(all_data[0]))]
+                                logger.warning(f"스키마에서 컬럼명을 가져올 수 없어 기본 컬럼명을 사용합니다: {columns}")
+                        except Exception:
+                            columns = [f"column_{i}" for i in range(len(all_data[0]))]
+                            logger.warning(f"스키마 조회 실패로 기본 컬럼명을 사용합니다: {columns}")
+                except Exception as e:
                     # 컬럼 정보 가져오기 실패 시 기본 컬럼명 생성
                     columns = [f"column_{i}" for i in range(len(all_data[0]))]
-                    logger.warning(
-                        f"컬럼 정보 가져오기 실패, 기본 컬럼명을 사용합니다: {columns}"
-                    )
-
+                    logger.warning(f"컬럼 정보를 가져올 수 없어 기본 컬럼명을 사용합니다: {columns}")
+                
                 df = pd.DataFrame(all_data, columns=columns)
 
                 # CSV로 저장
