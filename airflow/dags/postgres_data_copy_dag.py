@@ -263,7 +263,37 @@ def build_dynamic_sql(table_config: dict, sql_type: str, **kwargs) -> str:
     """
     테이블 설정에 따라 동적으로 SQL 생성
     """
-    base_sql = f"SELECT * FROM {table_config['source']}"
+    # 🚨 PRIORITY 컬럼 특별 처리 - 소수점 값을 정수로 변환
+    if table_config['source'] == 'm23.edi_690':
+        logger.info("🚨 m23.edi_690 테이블 감지! PRIORITY 컬럼 소수점 값 변환 SQL 생성")
+        base_sql = f"""
+            SELECT
+                eventcd, eventid, optionid, serialid, scexhid, sedolid, actflag, changed, created,
+                secid, issid, isin, uscode, issuername, cntryofincorp, sectycd, securitydesc,
+                parvalue, pvcurrency, statusflag, primaryexchgcd, sedol, sedolcurrency, defunct,
+                sedolregcntry, exchgcntry, exchgcd, mic, micseg, localcode, liststatus, issuedate,
+                date1type, date1, date2type, date2, date3type, date3, date4type, date4, date5type,
+                date5, date6type, date6, date7type, date7, date8type, date8, date9type, date9,
+                date10type, date10, date11type, date11, date12type, date12, paytype,
+                CASE
+                    WHEN priority IS NULL THEN NULL
+                    WHEN priority = '' THEN NULL
+                    WHEN priority ~ '^[0-9]+\.[0-9]+$' THEN CAST(CAST(priority AS NUMERIC) AS BIGINT)::TEXT
+                    ELSE priority
+                END AS priority,
+                defaultopt, outurnsecid, outurnisin, ratioold, rationew, fractions, currency,
+                rate1type, rate1, rate2type, rate2, field1name, field1, field2name, field2,
+                field3name, field3, field4name, field4, field5name, field5, field6name, field6,
+                field7name, field7, field8name, field8, field9name, field9, field10name, field10,
+                field11name, field11, field12name, field12, field13name, field13, field14name,
+                field14, field15name, field15, field16name, field16, field17name, field17,
+                field18name, field18, field19name, field19, field20name, field20, field21name,
+                field21, field22name, field22, uptodate
+            FROM {table_config['source']}
+        """
+    else:
+        base_sql = f"SELECT * FROM {table_config['source']}"
+
     where_conditions = []
 
     if sql_type == "select_incremental":
@@ -620,8 +650,27 @@ def ensure_target_table_exists(table_config: dict, **context) -> str:
         target_hook = PostgresHook(postgres_conn_id=TARGET_CONN_ID)
         source_hook = PostgresHook(postgres_conn_id=SOURCE_CONN_ID)
 
-        # 타겟 테이블이 이미 존재하는지 확인
+        # 타겟 스키마와 테이블명 분리
         target_schema, target_table = table_config["target"].split(".")
+
+        # 1단계: 스키마가 존재하는지 확인하고 없으면 생성
+        schema_exists_sql = f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.schemata
+                WHERE schema_name = '{target_schema}'
+            )
+        """
+        schema_exists = target_hook.get_first(schema_exists_sql)[0]
+
+        if not schema_exists:
+            logger.info(f"Schema {target_schema} does not exist, creating it...")
+            create_schema_sql = f"CREATE SCHEMA IF NOT EXISTS {target_schema}"
+            target_hook.run(create_schema_sql)
+            logger.info(f"Schema {target_schema} created successfully")
+        else:
+            logger.info(f"Schema {target_schema} already exists")
+
+        # 2단계: 타겟 테이블이 이미 존재하는지 확인
         check_sql = f"""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables
@@ -630,16 +679,27 @@ def ensure_target_table_exists(table_config: dict, **context) -> str:
             )
         """
 
+        logger.info(f"Checking table existence with SQL: {check_sql}")
         table_exists = target_hook.get_first(check_sql)[0]
+        logger.info(f"Table existence check result: {table_exists}")
 
         if table_exists:
             logger.info(f"Target table {table_config['target']} already exists")
-            return f"Target table {table_config['target']} already exists"
+            # 실제로 테이블이 정말 존재하는지 한 번 더 확인
+            verify_sql = f"SELECT COUNT(*) FROM {table_config['target']} LIMIT 1"
+            try:
+                row_count = target_hook.get_first(verify_sql)[0]
+                logger.info(f"Table verification successful: {row_count} rows found")
+                return f"Target table {table_config['target']} already exists and verified"
+            except Exception as verify_error:
+                logger.warning(f"Table verification failed: {verify_error}, will recreate table")
+                # 테이블이 실제로는 존재하지 않으므로 생성 진행
+                pass
 
-        # 소스 테이블의 컬럼 정보 가져오기
+        # 소스 테이블의 컬럼 정보 가져오기 (max_length 포함)
         source_schema, source_table = table_config["source"].split(".")
         columns_sql = """
-            SELECT column_name, data_type AS type, is_nullable AS nullable, column_default AS default
+            SELECT column_name, data_type AS type, is_nullable AS nullable, column_default AS default, character_maximum_length AS max_length
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
@@ -654,16 +714,53 @@ def ensure_target_table_exists(table_config: dict, **context) -> str:
                 f"No columns found in source table {table_config['source']}"
             )
 
-        # CREATE TABLE 구문 생성
+        # CREATE TABLE 구문 생성 - DataCopyEngine과 동일한 타입 매핑 사용
         create_sql = f"CREATE TABLE {table_config['target']} ("
         column_definitions = []
 
         for col in columns:
-            col_name, col_type, nullable, col_default = col
-            nullable_clause = "NULL" if nullable == "YES" else "NOT NULL"
+            col_name, col_type, nullable, col_default, max_length = col  # max_length 추가
+            is_nullable = nullable == "YES"
+
+            # DataCopyEngine과 동일한 타입 매핑 로직 사용
+            if "char" in col_type.lower() or "text" in col_type.lower():
+                if max_length and max_length > 0:
+                    pg_type = f"VARCHAR({max_length})"
+                else:
+                    pg_type = "TEXT"
+            elif "int" in col_type.lower():
+                if "bigint" in col_type.lower():
+                    pg_type = "BIGINT"
+                elif "smallint" in col_type.lower():
+                    pg_type = "SMALLINT"
+                else:
+                    pg_type = "INTEGER"
+            elif "decimal" in col_type.lower() or "numeric" in col_type.lower():
+                pg_type = "NUMERIC"
+            elif "float" in col_type.lower() or "double" in col_type.lower():
+                pg_type = "DOUBLE PRECISION"
+            elif "real" in col_type.lower():
+                pg_type = "REAL"
+            elif "date" in col_type.lower():
+                pg_type = "DATE"
+            elif "time" in col_type.lower():
+                if "timestamp" in col_type.lower():
+                    pg_type = "TIMESTAMP"
+                else:
+                    pg_type = "TIME"
+            elif "bool" in col_type.lower():
+                pg_type = "BOOLEAN"
+            elif "json" in col_type.lower():
+                pg_type = "JSONB"
+            elif "uuid" in col_type.lower():
+                pg_type = "UUID"
+            else:
+                pg_type = "TEXT"  # 기본값
+
+            nullable_clause = "NOT NULL" if not is_nullable else ""
             default = f" DEFAULT {col_default}" if col_default else ""
             column_definitions.append(
-                f"{col_name} {col_type} {nullable_clause}{default}"
+                f"{col_name} {pg_type} {nullable_clause}{default}"
             )
 
         create_sql += ", ".join(column_definitions) + ")"

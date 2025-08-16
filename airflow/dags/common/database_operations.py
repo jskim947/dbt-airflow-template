@@ -78,17 +78,37 @@ class DatabaseOperations:
         """
         테이블 스키마 정보 조회
 
+        간단한 규칙:
+        - raw_data.*, staging.*, mart.* 등은 타겟 DB에서 조회
+        - 그 외는 소스 DB에서 조회
+        - 명시적 conn_id가 있으면 해당 DB 사용
+
         Args:
             table_name: 테이블명 (스키마.테이블명 형식)
-            conn_id: 연결 ID (None이면 소스 데이터베이스 사용)
+            conn_id: 연결 ID (None이면 자동으로 소스/타겟 DB 구분)
 
         Returns:
             테이블 스키마 정보
         """
-        if conn_id is None:
-            hook = self.get_source_hook()
-        else:
+        # 명시적 연결 ID가 있으면 해당 DB 사용
+        if conn_id:
             hook = PostgresHook(postgres_conn_id=conn_id)
+            db_type = "명시적 연결"
+        else:
+            # 간단한 스키마 기반 DB 구분
+            if "." in table_name:
+                schema = table_name.split(".", 1)[0].lower()
+            else:
+                schema = "public"
+
+            # 타겟 DB 스키마 (데이터 웨어하우스)
+            if schema in ["raw_data", "staging", "mart", "warehouse", "analytics"]:
+                hook = self.get_target_hook()
+                db_type = "타겟 DB"
+            else:
+                # 기본값: 소스 DB
+                hook = self.get_source_hook()
+                db_type = "소스 DB"
 
         try:
             # 스키마와 테이블명 분리
@@ -98,7 +118,7 @@ class DatabaseOperations:
                 schema = "public"
                 table = table_name
 
-            logger.info(f"테이블 스키마 조회: 스키마={schema}, 테이블={table}")
+            logger.info(f"테이블 스키마 조회: 스키마={schema}, 테이블={table} ({db_type})")
 
             # 컬럼 정보 조회
             columns_query = """
@@ -117,7 +137,7 @@ class DatabaseOperations:
 
             if not columns:
                 raise Exception(
-                    f"테이블 {schema}.{table}의 컬럼 정보를 찾을 수 없습니다."
+                    f"테이블 {schema}.{table}의 컬럼 정보를 찾을 수 없습니다. ({db_type})"
                 )
 
             # 제약조건 정보 조회 (선택적 처리)
@@ -163,7 +183,7 @@ class DatabaseOperations:
             }
 
             logger.info(
-                f"테이블 스키마 조회 성공: {table_name}, 컬럼 수: {len(columns)}"
+                f"테이블 스키마 조회 성공: {table_name}, 컬럼 수: {len(columns)} ({db_type})"
             )
             return schema_info
 
@@ -182,16 +202,31 @@ class DatabaseOperations:
 
         Args:
             table_name: 테이블명
-            conn_id: 연결 ID
+            conn_id: 연결 ID (None이면 자동으로 소스/타겟 DB 구분)
             where_clause: WHERE 절 조건
 
         Returns:
             행 수
         """
-        if conn_id is None:
-            hook = self.get_source_hook()
-        else:
+        # 명시적 연결 ID가 있으면 해당 DB 사용
+        if conn_id:
             hook = PostgresHook(postgres_conn_id=conn_id)
+            db_type = "명시적 연결"
+        else:
+            # 간단한 스키마 기반 DB 구분
+            if "." in table_name:
+                schema = table_name.split(".", 1)[0].lower()
+            else:
+                schema = "public"
+
+            # 타겟 DB 스키마 (데이터 웨어하우스)
+            if schema in ["raw_data", "staging", "mart", "warehouse", "analytics"]:
+                hook = self.get_target_hook()
+                db_type = "타겟 DB"
+            else:
+                # 기본값: 소스 DB
+                hook = self.get_source_hook()
+                db_type = "소스 DB"
 
         try:
             if where_clause:
@@ -202,11 +237,11 @@ class DatabaseOperations:
             result = hook.get_first(query)
             count = result[0] if result else 0
 
-            logger.info(f"테이블 행 수 조회 성공: {table_name}, 행 수: {count}")
+            logger.info(f"테이블 행 수 조회 성공: {table_name}, 행 수: {count} ({db_type})")
             return count
 
         except Exception as e:
-            logger.error(f"테이블 행 수 조회 실패: {table_name}, 오류: {e!s}")
+            logger.error(f"테이블 행 수 조회 실패: {table_name}, 오류: {e!s} ({db_type})")
             raise
 
     def validate_data_integrity(
@@ -230,9 +265,9 @@ class DatabaseOperations:
             # 기본키 컬럼들을 쉼표로 연결
             pk_columns = ", ".join(primary_keys)
 
-            # 소스와 타겟의 행 수 비교 - 연결 ID 명시적 지정
-            source_count = self.get_table_row_count(source_table, self.source_conn_id)
-            target_count = self.get_table_row_count(target_table, self.target_conn_id)
+            # 소스와 타겟의 행 수 비교 - 자동 DB 감지 사용
+            source_count = self.get_table_row_count(source_table)  # 자동으로 소스 DB 감지
+            target_count = self.get_table_row_count(target_table)  # 자동으로 타겟 DB 감지
 
             # 기본키별 데이터 일치 여부 확인 - 개선된 검증
             # 각 DB에서 개별적으로 샘플 데이터 검증
@@ -288,6 +323,192 @@ class DatabaseOperations:
                 f"오류: {e!s}"
             )
             raise
+
+    def create_table_and_verify_schema(
+        self, target_table: str, source_schema: dict[str, Any], max_retries: int = 3
+    ) -> dict[str, Any]:
+        """
+        타겟 테이블 생성과 스키마 검증을 한 번에 처리
+
+        Args:
+            target_table: 타겟 테이블명
+            source_schema: 소스 테이블 스키마 정보
+            max_retries: 최대 재시도 횟수
+
+        Returns:
+            검증된 타겟 테이블 스키마 정보
+        """
+        try:
+            # 타겟 스키마와 테이블명 분리
+            if "." in target_table:
+                target_schema, table_name = target_table.split(".", 1)
+            else:
+                target_schema = "public"
+                table_name = target_table
+
+            # 1단계: 스키마 존재 확인 및 생성
+            self._ensure_schema_exists(target_schema)
+
+            # 2단계: 테이블 존재 확인
+            table_exists = self._check_table_exists(target_table)
+
+            if table_exists:
+                logger.info(f"테이블 {target_table}이 이미 존재합니다. 기존 테이블 스키마 검증")
+                # 기존 테이블의 스키마를 직접 검증
+                verified_schema = self._verify_table_schema_with_retry(
+                    target_table, source_schema, max_retries
+                )
+            else:
+                # 3단계: 테이블 생성
+                self._create_table_with_schema(target_table, source_schema)
+
+                # 4단계: 스키마 검증 (재시도 로직 포함)
+                verified_schema = self._verify_table_schema_with_retry(
+                    target_table, source_schema, max_retries
+                )
+
+            logger.info(f"테이블 생성 및 스키마 검증 완료: {target_table}")
+            return verified_schema
+
+        except Exception as e:
+            error_msg = f"테이블 생성 및 스키마 검증 실패: {target_table}, 오류: {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
+    def _ensure_schema_exists(self, schema_name: str) -> None:
+        """스키마 존재 확인 및 생성"""
+        try:
+            hook = self.get_target_hook()
+
+            # 스키마 존재 확인
+            schema_exists_sql = f"""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.schemata
+                    WHERE schema_name = '{schema_name}'
+                )
+            """
+            schema_exists = hook.get_first(schema_exists_sql)[0]
+
+            if not schema_exists:
+                logger.info(f"스키마 {schema_name} 생성 중...")
+                create_schema_sql = f"CREATE SCHEMA IF NOT EXISTS {schema_name}"
+                hook.run(create_schema_sql)
+                logger.info(f"스키마 {schema_name} 생성 완료")
+            else:
+                logger.info(f"스키마 {schema_name} 이미 존재")
+
+        except Exception as e:
+            logger.error(f"스키마 {schema_name} 확인/생성 실패: {e}")
+            raise
+
+    def _create_table_with_schema(self, target_table: str, source_schema: dict[str, Any]) -> None:
+        """스키마 정보를 기반으로 테이블 생성"""
+        try:
+            hook = self.get_target_hook()
+
+            # 1단계: 테이블이 이미 존재하는지 확인
+            if "." in target_table:
+                target_schema, table_name = target_table.split(".", 1)
+            else:
+                target_schema = "public"
+                table_name = target_table
+
+            table_exists_sql = f"""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = '{target_schema}'
+                    AND table_name = '{table_name}'
+                )
+            """
+            table_exists = hook.get_first(table_exists_sql)[0]
+
+            if table_exists:
+                logger.info(f"테이블 {target_table}이 이미 존재합니다. 기존 테이블 사용")
+                return
+
+            # 2단계: 테이블이 존재하지 않는 경우에만 생성
+            column_definitions = []
+            for col in source_schema["columns"]:
+                col_name = col["name"]
+                col_type = col["type"]
+                nullable = "" if col["nullable"] else " NOT NULL"
+
+                # max_length가 있는 경우 VARCHAR 길이 지정
+                if col_type.lower() in ["character varying", "varchar"] and col.get("max_length"):
+                    col_type = f"VARCHAR({col['max_length']})"
+
+                column_definitions.append(f"{col_name} {col_type}{nullable}")
+
+            # CREATE TABLE IF NOT EXISTS 구문 생성
+            create_sql = f"CREATE TABLE IF NOT EXISTS {target_table} ({', '.join(column_definitions)})"
+
+            logger.info(f"테이블 생성 SQL: {create_sql}")
+            hook.run(create_sql)
+            logger.info(f"테이블 {target_table} 생성 완료")
+
+        except Exception as e:
+            logger.error(f"테이블 {target_table} 생성 실패: {e}")
+            raise
+
+    def _verify_table_schema_with_retry(
+        self, target_table: str, source_schema: dict[str, Any], max_retries: int
+    ) -> dict[str, Any]:
+        """테이블 스키마 검증 (재시도 로직 포함)"""
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"스키마 검증 시도 {attempt + 1}/{max_retries}: {target_table}")
+
+                # 타겟 테이블 스키마 조회
+                target_schema = self.get_table_schema(target_table)
+
+                # 컬럼 수 비교
+                source_columns = len(source_schema["columns"])
+                target_columns = len(target_schema["columns"])
+
+                if source_columns == target_columns:
+                    logger.info(f"스키마 검증 성공: {target_table}, 컬럼 수: {target_columns}")
+                    return target_schema
+                else:
+                    raise Exception(f"컬럼 수 불일치: 소스 {source_columns}, 타겟 {target_columns}")
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # 점진적 대기
+                    logger.warning(f"스키마 검증 실패 (시도 {attempt + 1}): {e}, {wait_time}초 후 재시도")
+                    import time
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"스키마 검증 최종 실패: {target_table}, 오류: {e}")
+                    raise Exception(f"스키마 검증 실패: {target_table}, 오류: {e}")
+
+        # 이 부분은 실행되지 않지만 타입 체커를 위해 추가
+        raise Exception("스키마 검증 실패")
+
+    def _check_table_exists(self, target_table: str) -> bool:
+        """테이블 존재 여부 확인"""
+        try:
+            hook = self.get_target_hook()
+
+            if "." in target_table:
+                target_schema, table_name = target_table.split(".", 1)
+            else:
+                target_schema = "public"
+                table_name = target_table
+
+            table_exists_sql = f"""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = '{target_schema}'
+                    AND table_name = '{table_name}'
+                )
+            """
+            table_exists = hook.get_first(table_exists_sql)[0]
+
+            return table_exists
+
+        except Exception as e:
+            logger.error(f"테이블 존재 여부 확인 실패: {target_table}, 오류: {e}")
+            return False
 
     def close_connections(self):
         """데이터베이스 연결 종료"""

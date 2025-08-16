@@ -71,7 +71,21 @@ TABLES_CONFIG = [
         "primary_key": ["인포맥스코드", "팩셋거래소", "gts_exnm", "티커"],
         "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
         "batch_size": 10000,
-    }
+    },
+    # {
+    #     "source": "fds_copy.sym_v1_sym_ticker_exchange",
+    #     "target": "raw_data.sym_v1_sym_ticker_exchange",
+    #     "primary_key": ["fsym_id"],
+    #     "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
+    #     "batch_size": 20000,
+    # },
+    {
+        "source": "fds_copy.ff_v3_ff_sec_entity",
+        "target": "raw_data.ff_v3_ff_sec_entity",
+        "primary_key": ["fsym_id"],
+        "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
+        "batch_size": 20000,
+    },
     # 추가 테이블 설정은 여기에 추가
 ]
 
