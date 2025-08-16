@@ -1,180 +1,229 @@
 
-# dbt-airflow-template
+# DBT-Airflow Template
 
-This template provides a production-ready setup for running dbt with
-Apache Airflow using Docker. It includes a complete development
-environment with PostgreSQL, dbt, and Airflow configured to work
-together seamlessly.
+PostgreSQL 데이터베이스 간 데이터 복사 및 변환을 위한 Airflow DAG와 DBT 통합 템플릿입니다.
 
-## Prerequisites
+## 🚀 프로젝트 개요
 
-- Docker and Docker Compose
-- Python 3.12 or later
-- `make` command-line tool
-- Git
+이 프로젝트는 다음과 같은 기능을 제공합니다:
 
-## Quick Start
+- **데이터 복사**: PostgreSQL 소스에서 타겟으로 데이터 복사
+- **데이터 변환**: DBT를 통한 데이터 변환 및 스냅샷 생성
+- **자동화**: Airflow를 통한 스케줄링 및 워크플로우 관리
+- **모니터링**: 데이터 파이프라인 실행 상태 추적
 
-1. Create a new repository from this template
-2. Clone your new repository
-3. Start the development environment:
-```bash
-make init        # Create virtual environment and install dependencies
-make docker-up   # Start all services
+## 🏗️ 아키텍처
+
 ```
-4. Access Airflow at http://localhost:18080
-   - Username: `admin`
-   - Password: `admin`
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Source DB     │    │     Airflow     │    │   Target DB     │
+│  (PostgreSQL)   │───▶│      DAGs       │───▶│  (PostgreSQL)   │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                              │
+                              ▼
+                       ┌─────────────────┐
+                       │      DBT        │
+                       │   Snapshots     │
+                       │   Models        │
+                       └─────────────────┘
+```
 
-5. See [docs/example-workflow.md](docs/example-workflow.md) for a
-   guide on running and fixing the example dbt workflow. This dbt
-   example comes from `dbt init` and has an intentional validation
-   error.
-
-## Project Structure
+## 📁 프로젝트 구조
 
 ```
 dbt-airflow-template/
 ├── airflow/
-│   ├── dags/           # Airflow DAG definitions
-│   ├── dbt/           # dbt project files
-│   ├── logs/          # Airflow and dbt logs
-│   └── plugins/       # Airflow plugins
-├── docker/            # Docker configuration files
-├── docs/             # Documentation
-└── Makefile          # Development automation
+│   ├── dags/                    # Airflow DAG 파일들
+│   │   ├── common/             # 공통 유틸리티 모듈
+│   │   ├── postgres_data_copy_dag.py          # 메인 데이터 복사 DAG
+│   │   ├── postgres_data_copy_dag_refactored.py # 리팩토링된 데이터 복사 DAG
+│   │   ├── dbt_processing_dag.py               # DBT 처리 DAG
+│   │   └── main_orchestration_dag.py           # 메인 오케스트레이션 DAG
+│   ├── dbt/                    # DBT 프로젝트
+│   │   ├── models/             # DBT 모델
+│   │   ├── snapshots/          # DBT 스냅샷
+│   │   └── dbt_project.yml     # DBT 프로젝트 설정
+│   └── plugins/                # Airflow 플러그인
+├── docker/                     # Docker 설정
+├── docs/                       # 프로젝트 문서
+└── README.md                   # 이 파일
 ```
 
-## Development Workflow
+## 🛠️ 주요 기능
 
-### Initial Setup
+### 데이터 복사 엔진
+- **스마트 스키마 감지**: 소스 테이블 스키마 자동 감지
+- **데이터 타입 변환**: CSV 읽기/쓰기 시 자동 데이터 타입 변환
+- **증분 동기화**: 변경된 데이터만 선택적 복사
+- **배치 처리**: 대용량 데이터 처리 최적화
 
-1. Create a new repository from this template
-2. Clone your new repository
-3. Initialize the development environment:
+### DBT 통합
+- **자동 스냅샷**: 데이터 변경사항 자동 추적
+- **모델 실행**: 데이터 변환 파이프라인
+- **테스트 실행**: 데이터 품질 검증
+
+### 모니터링 및 로깅
+- **실행 상태 추적**: 각 단계별 성공/실패 상태
+- **성능 메트릭**: 실행 시간 및 처리된 레코드 수
+- **에러 핸들링**: 상세한 에러 로그 및 복구 방안
+
+## 🚀 빠른 시작
+
+### 1. 환경 설정
+
 ```bash
-make init        # Create virtual environment and install dependencies
-make docker-up   # Start all services
+# 저장소 클론
+git clone <repository-url>
+cd dbt-airflow-template
+
+# 가상환경 생성 및 활성화
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# 또는
+.venv\Scripts\activate     # Windows
+
+# 의존성 설치
+pip install -r requirements.txt
 ```
 
-### Code Quality
+### 2. 데이터베이스 연결 설정
 
-This template includes several code quality tools:
-
-- pre-commit hooks for automated checks
-- ruff for Python linting and formatting
-- mypy for static type checking
-
-To run code quality checks manually:
 ```bash
-make pre-commit              # Run all pre-commit checks
-make pre-commit-upgrade      # Update pre-commit hooks to latest versions
+# 환경 변수 설정
+cp .env.example .env
+# .env 파일 편집하여 데이터베이스 연결 정보 입력
 ```
 
-The checks will also run automatically on `git commit`.
+### 3. Airflow 실행
 
-### Local Development
-
-1. Activate the virtual environment:
 ```bash
-source .venv/bin/activate
+# Airflow 초기화
+airflow db init
+
+# 사용자 생성
+airflow users create \
+    --username admin \
+    --firstname Admin \
+    --lastname User \
+    --role Admin \
+    --email admin@example.com \
+    --password admin
+
+# Airflow 웹서버 시작
+airflow webserver --port 8080
+
+# Airflow 스케줄러 시작 (새 터미널)
+airflow scheduler
 ```
 
-2. Make changes to your dbt models in `airflow/dbt/models/`
+### 4. DAG 활성화
 
-3. Test dbt models:
+Airflow 웹 UI에서 다음 DAG들을 활성화:
+- `postgres_multi_table_copy`: 메인 데이터 복사 DAG
+- `dbt_processing`: DBT 처리 DAG
+
+## 📊 사용 예시
+
+### 기본 데이터 복사 설정
+
+```python
+table_config = {
+    "source": "source_schema.table_name",
+    "target": "target_schema.table_name",
+    "primary_key": ["id"],
+    "sync_mode": "incremental_sync",
+    "incremental_field": "updated_at",
+    "batch_size": 10000
+}
+```
+
+### 증분 동기화 설정
+
+```python
+table_config = {
+    "source": "m23.edi_690",
+    "target": "raw_data.edi_690",
+    "primary_key": ["eventcd", "eventid", "optionid"],
+    "sync_mode": "incremental_sync",
+    "incremental_field": "changed",
+    "incremental_field_type": "timestamp"
+}
+```
+
+## 🔧 설정 옵션
+
+### 동기화 모드
+- **`full_sync`**: 전체 데이터 복사
+- **`incremental_sync`**: 변경된 데이터만 복사
+
+### 증분 필드 타입
+- **`timestamp`**: 타임스탬프 기반 증분
+- **`yyyymmdd`**: 날짜 기반 증분
+- **`date`**: 날짜 기반 증분
+- **`datetime`**: 날짜시간 기반 증분
+
+### 배치 크기
+- 기본값: 10,000
+- 메모리 사용량과 성능을 고려하여 조정
+
+## 📈 모니터링
+
+### Airflow UI
+- DAG 실행 상태 확인
+- 태스크별 실행 시간 및 로그
+- 실패한 태스크 재실행
+
+### 로그 분석
+- 각 단계별 상세 로그
+- 데이터 처리 통계
+- 에러 및 경고 메시지
+
+## 🐛 문제 해결
+
+### 일반적인 문제들
+
+1. **데이터베이스 연결 실패**
+   - 연결 정보 확인
+   - 방화벽 설정 확인
+   - 데이터베이스 서비스 상태 확인
+
+2. **스키마 불일치**
+   - 소스/타겟 테이블 구조 확인
+   - 컬럼 타입 매핑 확인
+
+3. **메모리 부족**
+   - 배치 크기 줄이기
+   - JVM 힙 크기 조정
+
+### 로그 확인
+
 ```bash
-make test-dbt
+# Airflow 로그 확인
+airflow tasks logs <dag_id> <task_id> <execution_date>
+
+# DBT 로그 확인
+dbt run --log-level debug
 ```
 
-### Docker Environment
+## 🤝 기여하기
 
-The development environment includes:
-- Airflow Webserver (http://localhost:18080)
-- Airflow Scheduler
-- PostgreSQL (port 15432)
-
-Common commands:
-```bash
-make docker-up      # Start services
-make docker-down    # Stop services
-make docker-logs    # View logs
-make docker-clean   # Remove containers and volumes
-```
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file in the root directory to override default
-settings:
-
-```env
-POSTGRES_USER=airflow
-POSTGRES_PASSWORD=airflow
-POSTGRES_DB=airflow
-POSTGRES_HOST=postgres
-```
-
-### dbt Configuration
-
-- dbt profiles are stored in `airflow/dbt/profiles.yml`
-- Models are located in `airflow/dbt/models/`
-- The default target database is the same PostgreSQL instance used by
-  Airflow
-
-### Airflow Configuration
-
-- DAGs are stored in `airflow/dags/`
-- The example DAG (`example_dbt_dag.py`) demonstrates how to:
-  - Run dbt commands in Airflow
-  - Handle dependencies between dbt tasks
-  - Implement proper error handling
-
-## Production Deployment
-
-1. Build the production Docker image:
-```bash
-make docker-build DOCKER_REGISTRY=your-registry DOCKER_PACKAGE=your-package DOCKER_TAG=your-tag
-```
-
-2. Push the image to your registry:
-```bash
-make docker-push DOCKER_REGISTRY=your-registry DOCKER_PACKAGE=your-package DOCKER_TAG=your-tag
-```
-
-## Maintenance
-
-- Logs are stored in `airflow/logs/`
-- Dependencies are managed through `pyproject.toml`
-- Docker requirements are automatically compiled to
-  `docker/requirements.txt`
-
-## Troubleshooting
-
-1. If Airflow fails to start:
-   - Check logs: `make docker-logs`
-   - Ensure PostgreSQL is healthy: `make docker-ps`
-   - Try cleaning and restarting: `make docker-clean docker-up`
-
-2. If dbt tests fail:
-   - Verify database connections in `profiles.yml`
-   - Check dbt logs in `airflow/logs/`
-   - Run `make test-dbt` for detailed error messages
-
-## Contributing
-
-1. Create a feature branch or fork
-2. Make your changes
-3. Ensure all code quality checks pass:
-   ```bash
-   make pre-commit
-   ```
-4. Test thoroughly: at a minimum `make docker-up`should build, run, and example workflow should start (which
-   will fail by design). See [docs/example-workflow.md](docs/example-workflow.md) for more info.
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
 5. Submit a pull request
 
-## License
+## 📄 라이선스
 
-This template is distributed under the MIT license. See `LICENSE` file
-for more information.
+이 프로젝트는 MIT 라이선스 하에 배포됩니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
+
+## 📞 지원
+
+문제가 있거나 질문이 있으시면:
+- [Issues](../../issues) 페이지에 이슈 생성
+- 프로젝트 문서 참조
+- 코드 리뷰 요청
+
+---
+
+**참고**: 이 프로젝트는 PostgreSQL과 Airflow를 사용하는 데이터 엔지니어링 워크플로우를 위한 템플릿입니다. 프로덕션 환경에서 사용하기 전에 보안 및 성능 요구사항을 충족하는지 확인하세요.
