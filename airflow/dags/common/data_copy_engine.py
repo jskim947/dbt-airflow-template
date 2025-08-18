@@ -1277,6 +1277,25 @@ class DataCopyEngine:
                         DO NOTHING;
                     """
 
+                # 증분 동기화: 중복키 스킵 (ON CONFLICT DO NOTHING)
+                if non_pk_column_names:
+                    merge_sql = f"""
+                        INSERT INTO {target_table} ({pk_columns}, {', '.join(non_pk_column_names)})
+                        SELECT {pk_columns}, {', '.join(non_pk_column_names)}
+                        FROM {source_table}
+                        ON CONFLICT ({pk_columns})
+                        DO NOTHING;
+                    """
+                else:
+                    # 비기본키 컬럼이 없는 경우 기본키만 사용
+                    merge_sql = f"""
+                        INSERT INTO {target_table} ({pk_columns})
+                        SELECT {pk_columns}
+                        FROM {source_table}
+                        ON CONFLICT ({pk_columns})
+                        DO NOTHING;
+                    """
+
             # MERGE 실행
             start_time = pd.Timestamp.now()
             self.target_hook.run(merge_sql)
@@ -1869,18 +1888,14 @@ class DataCopyEngine:
                         FROM {source_table};
                     """
             else:
-                # 증분 동기화: UPSERT (INSERT ... ON CONFLICT)
+                # 증분 동기화: 중복키 스킵 (ON CONFLICT DO NOTHING)
                 if non_pk_column_names:
-                    update_set_clause = ", ".join(
-                        [f"{col} = EXCLUDED.{col}" for col in non_pk_column_names]
-                    )
-
                     merge_sql = f"""
                         INSERT INTO {target_table} ({pk_columns}, {', '.join(non_pk_column_names)})
                         SELECT {pk_columns}, {', '.join(non_pk_column_names)}
                         FROM {source_table}
                         ON CONFLICT ({pk_columns})
-                        DO UPDATE SET {update_set_clause};
+                        DO NOTHING;
                     """
                 else:
                     # 비기본키 컬럼이 없는 경우 기본키만 사용
@@ -3121,6 +3136,25 @@ class DataCopyEngine:
                                 DO NOTHING;
                             """
 
+                        # 증분 동기화: 중복키 스킵 (ON CONFLICT DO NOTHING)
+                        if non_pk_column_names:
+                            merge_sql = f"""
+                                INSERT INTO {target_table} ({pk_columns}, {', '.join(non_pk_column_names)})
+                                SELECT {pk_columns}, {', '.join(non_pk_column_names)}
+                                FROM {source_table}
+                                ON CONFLICT ({pk_columns})
+                                DO NOTHING;
+                            """
+                        else:
+                            # 비기본키 컬럼이 없는 경우 기본키만 사용
+                            merge_sql = f"""
+                                INSERT INTO {target_table} ({pk_columns})
+                                SELECT {pk_columns}
+                                FROM {source_table}
+                                ON CONFLICT ({pk_columns})
+                                DO NOTHING;
+                            """
+
                     # MERGE 실행
                     start_time = pd.Timestamp.now()
                     cursor.execute(merge_sql)
@@ -3327,6 +3361,25 @@ class DataCopyEngine:
                         FROM {source_table}
                         ON CONFLICT ({pk_columns})
                         DO UPDATE SET {update_set_clause};
+                    """
+                else:
+                    # 비기본키 컬럼이 없는 경우 기본키만 사용
+                    merge_sql = f"""
+                        INSERT INTO {target_table} ({pk_columns})
+                        SELECT {pk_columns}
+                        FROM {source_table}
+                        ON CONFLICT ({pk_columns})
+                        DO NOTHING;
+                    """
+
+                # 증분 동기화: 중복키 스킵 (ON CONFLICT DO NOTHING)
+                if non_pk_column_names:
+                    merge_sql = f"""
+                        INSERT INTO {target_table} ({pk_columns}, {', '.join(non_pk_column_names)})
+                        SELECT {pk_columns}, {', '.join(non_pk_column_names)}
+                        FROM {source_table}
+                        ON CONFLICT ({pk_columns})
+                        DO NOTHING;
                     """
                 else:
                     # 비기본키 컬럼이 없는 경우 기본키만 사용
