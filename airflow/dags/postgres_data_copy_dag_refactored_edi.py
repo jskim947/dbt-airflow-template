@@ -71,7 +71,7 @@ EDI_TABLES_CONFIG = [
         "source": "m23.edi_690",
         "target": "raw_data.edi_690",
         "primary_key": ["eventcd", "eventid", "optionid", "serialid", "scexhid", "sedolid"],
-        "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
+        "sync_mode": "incremental_sync",  # 중복키 스킵을 위해 incremental_sync 사용
         "batch_size": 10000,
         "incremental_field": "changed",
         "incremental_field_type": "yyyymmdd",
