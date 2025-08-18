@@ -7,7 +7,6 @@ EDI 관련 PostgreSQL 테이블을 복사하는 DAG - 리팩토링 버전
 2. EDI 데이터 변환 및 검증
 3. 타겟 PostgreSQL에 EDI 데이터 로드
 4. EDI 데이터 무결성 검사
-5. dbt 스냅샷 생성
 
 동기화 모드:
 - incremental_sync: 증분 동기화 (기존 데이터 유지)
@@ -17,6 +16,8 @@ EDI 특화 기능:
 - EDI 이벤트 데이터 처리
 - 우선순위 필드 자동 변환
 - EDI 상태 추적
+
+참고: 이 DAG는 dbt 스냅샷을 포함하지 않으며, 순수한 EDI 데이터 복사에 집중합니다.
 """
 
 import logging
@@ -27,7 +28,6 @@ from typing import Any
 from common import (
     DatabaseOperations,
     DataCopyEngine,
-    DBTIntegration,
     MonitoringManager,
     ProgressTracker,
 )
@@ -57,7 +57,7 @@ dag = DAG(
     schedule_interval="0 9 * * *",  # 매일 9시(KST 18시)에 실행
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["postgres", "data-copy", "etl", "edi", "dbt-snapshot", "refactored"],
+    tags=["postgres", "data-copy", "etl", "edi", "refactored"],
     max_active_runs=1,
 )
 
@@ -65,20 +65,17 @@ dag = DAG(
 SOURCE_CONN_ID = "fs2_postgres"  # EDI 소스 데이터베이스 (기존 DAG와 동일)
 TARGET_CONN_ID = "postgres_default"  # 타겟 데이터베이스
 
-# dbt 프로젝트 경로 설정
-DBT_PROJECT_PATH = "/opt/airflow/dbt"
-
 # EDI 테이블 설정 (순차 처리)
 EDI_TABLES_CONFIG = [
     {
-        "source": "raw_data.edi_690",
+        "source": "m23.edi_690",
         "target": "raw_data.edi_690",
-        "primary_key": ["eventcd", "eventid", "optionid"],
+        "primary_key": ["eventcd", "eventid", "optionid", "serialid", "scexhid", "sedolid"],
         "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
         "batch_size": 10000,
-        "incremental_field": "eventdate",
+        "incremental_field": "changed",
         "incremental_field_type": "yyyymmdd",
-        "custom_where": "eventdate >= '20250812'",  # EDI 데이터 필터링
+        "custom_where": "changed >= '20250812'",  # EDI 데이터 필터링
     },
     # 추가 EDI 테이블 설정은 여기에 추가
 ]
@@ -267,61 +264,6 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
         raise Exception(error_msg)
 
 
-def create_dbt_snapshot(**context) -> dict[str, Any]:
-    """dbt 스냅샷 생성"""
-    try:
-        # 모니터링 시작
-        monitoring = MonitoringManager("dbt 스냅샷 생성")
-        monitoring.start_monitoring()
-
-        # 진행 상황 추적
-        progress = ProgressTracker(3, "dbt 스냅샷 생성")
-
-        # 1단계: dbt 통합 객체 생성
-        progress.start_step("dbt 통합 객체 생성", "DBTIntegration 객체 초기화")
-        dbt_integration = DBTIntegration(DBT_PROJECT_PATH)
-        progress.complete_step("dbt 통합 객체 생성")
-
-        monitoring.add_checkpoint("dbt 객체 생성", "DBTIntegration 객체 생성 완료")
-
-        # 2단계: 스냅샷 실행
-        progress.start_step("dbt 스냅샷 실행", "EDI 관련 테이블의 dbt 스냅샷 생성")
-        snapshot_result = dbt_integration.run_snapshot()
-        progress.complete_step("dbt 스냅샷 실행")
-
-        monitoring.add_checkpoint("스냅샷 실행", f"dbt 스냅샷 실행 완료: {snapshot_result}")
-
-        # 3단계: 모델 실행
-        progress.start_step("dbt 모델 실행", "EDI 관련 모델 실행")
-        model_result = dbt_integration.run_models()
-        progress.complete_step("dbt 모델 실행")
-
-        monitoring.add_checkpoint("모델 실행", f"dbt 모델 실행 완료: {model_result}")
-
-        # 모니터링 종료
-        monitoring.stop_monitoring("completed")
-
-        # 결과 반환
-        return {
-            "status": "success",
-            "snapshot_result": snapshot_result,
-            "model_result": model_result,
-            "monitoring_summary": monitoring.get_summary(),
-            "progress_summary": progress.get_progress(),
-        }
-
-    except Exception as e:
-        error_msg = f"dbt 스냅샷 생성 실패: {e}"
-        logger.error(error_msg)
-        
-        # 모니터링 종료 (실패 상태)
-        if 'monitoring' in locals():
-            monitoring.add_error(f"dbt 스냅샷 생성 실패: {str(e)}")
-            monitoring.stop_monitoring("failed")
-        
-        raise Exception(error_msg)
-
-
 # 태스크 정의
 validate_connections_task = PythonOperator(
     task_id="validate_connections",
@@ -332,7 +274,7 @@ validate_connections_task = PythonOperator(
 # EDI 테이블별 복사 태스크 생성
 edi_copy_tasks = []
 for i, table_config in enumerate(EDI_TABLES_CONFIG):
-    task_id = f"copy_edi_table_{i+1}_{table_config['source'].replace('.', '_').replace('raw_data_', '')}"
+    task_id = f"copy_edi_table_{i+1}_{table_config['source'].replace('.', '_').replace('m23_', '')}"
     
     copy_task = PythonOperator(
         task_id=task_id,
@@ -343,14 +285,8 @@ for i, table_config in enumerate(EDI_TABLES_CONFIG):
     
     edi_copy_tasks.append(copy_task)
 
-create_dbt_snapshot_task = PythonOperator(
-    task_id="create_dbt_snapshot",
-    python_callable=create_dbt_snapshot,
-    dag=dag,
-)
-
-# 태스크 의존성 설정
-validate_connections_task >> edi_copy_tasks >> create_dbt_snapshot_task
+# 태스크 의존성 설정 (dbt 스냅샷 없이)
+validate_connections_task >> edi_copy_tasks
 
 # DAG 문서화
 dag.doc_md = __doc__
@@ -381,13 +317,4 @@ EDI 테이블 복사 태스크 - {table_config['source']}
 - 기본키: {table_config.get('primary_key', [])}
 - 동기화 모드: {table_config.get('sync_mode', 'incremental_sync')}
 - 배치 크기: {table_config.get('batch_size', 10000)}
-"""
-
-create_dbt_snapshot_task.doc_md = """
-dbt 스냅샷 생성 태스크
-
-이 태스크는 다음을 수행합니다:
-1. EDI 관련 테이블의 dbt 스냅샷 생성
-2. EDI 관련 모델 실행
-3. 데이터 품질 및 변환 결과 검증
 """
