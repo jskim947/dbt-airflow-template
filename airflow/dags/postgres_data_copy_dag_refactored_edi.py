@@ -62,7 +62,7 @@ dag = DAG(
 )
 
 # 연결 ID 설정
-SOURCE_CONN_ID = "m23_postgres"  # EDI 소스 데이터베이스
+SOURCE_CONN_ID = "fs2_postgres"  # EDI 소스 데이터베이스 (기존 DAG와 동일)
 TARGET_CONN_ID = "postgres_default"  # 타겟 데이터베이스
 
 # dbt 프로젝트 경로 설정
