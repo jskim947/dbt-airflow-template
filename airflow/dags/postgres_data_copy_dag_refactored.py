@@ -27,67 +27,57 @@ from common import (
     ProgressTracker,
 )
 
+# 청크 방식 설정 헬퍼 함수
+def get_chunk_mode_settings(table_config: dict) -> dict:
+    """
+    테이블 설정에서 청크 방식 설정을 추출하는 헬퍼 함수
+    
+    Args:
+        table_config: 테이블 설정 딕셔너리
+        
+    Returns:
+        청크 방식 설정 딕셔너리
+    """
+    return {
+        "chunk_mode": table_config.get("chunk_mode", True),
+        "enable_checkpoint": table_config.get("enable_checkpoint", True),
+        "max_retries": table_config.get("max_retries", 3)
+    }
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
 # 로거 설정
 logger = logging.getLogger(__name__)
 
+# 공통 모듈 import
+from common import DAGConfigManager, DAGSettings, ConnectionManager
+
 # DAG 기본 설정
-default_args = {
-    "owner": "data_team",
-    "depends_on_past": False,
-    "email_on_failure": True,
-    "email_on_retry": False,
-    "retries": 2,
-    "retry_delay": timedelta(minutes=5),
-    "email": ["admin@example.com"],
-}
+default_args = DAGConfigManager.get_default_args(
+    owner=DAGSettings.DEFAULT_DAG_CONFIG["owner"],
+    retries=DAGSettings.DEFAULT_DAG_CONFIG["retries"],
+    retry_delay_minutes=DAGSettings.DEFAULT_DAG_CONFIG["retry_delay_minutes"]
+)
 
 # DAG 정의
-dag = DAG(
-    "postgres_multi_table_copy_refactored",
-    default_args=default_args,
+dag = DAGConfigManager.create_dag(
+    dag_id="postgres_multi_table_copy_refactored",
     description="Copy data from multiple PostgreSQL tables sequentially and create dbt snapshots (Refactored)",
-    schedule_interval="0 3,16 * * *",  # 매일 오전 3시, 오후 4시(16시)에 실행
-    start_date=datetime(2024, 1, 1),
-    catchup=False,
-    tags=["postgres", "data-copy", "etl", "multi-table", "dbt-snapshot", "refactored"],
-    max_active_runs=1,
+    schedule_interval=DAGSettings.get_schedule_intervals()["main_copy"],
+    tags=DAGSettings.DEFAULT_TAGS + ["multi-table", "dbt-snapshot"],
+    max_active_runs=DAGSettings.DEFAULT_DAG_CONFIG["max_active_runs"]
 )
 
 # 연결 ID 설정
-SOURCE_CONN_ID = "fs2_postgres"
-TARGET_CONN_ID = "postgres_default"
+SOURCE_CONN_ID = ConnectionManager.get_source_connection_id()
+TARGET_CONN_ID = ConnectionManager.get_target_connection_id()
 
 # dbt 프로젝트 경로 설정
 DBT_PROJECT_PATH = "/opt/airflow/dbt"
 
-# 여러 테이블 설정 (순차 처리)
-TABLES_CONFIG = [
-    {
-        "source": "fds_팩셋.인포맥스종목마스터",
-        "target": "raw_data.인포맥스종목마스터",
-        "primary_key": ["인포맥스코드", "팩셋거래소", "gts_exnm", "티커"],
-        "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
-        "batch_size": 10000,
-    },
-    # {
-    #     "source": "fds_copy.sym_v1_sym_ticker_exchange",
-    #     "target": "raw_data.sym_v1_sym_ticker_exchange",
-    #     "primary_key": ["fsym_id"],
-    #     "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
-    #     "batch_size": 20000,
-    # },
-    {
-        "source": "fds_copy.ff_v3_ff_sec_entity",
-        "target": "raw_data.ff_v3_ff_sec_entity",
-        "primary_key": ["fsym_id"],
-        "sync_mode": "full_sync",  # 'incremental_sync' 또는 'full_sync'
-        "batch_size": 20000,
-    },
-    # 추가 테이블 설정은 여기에 추가
-]
+# 테이블 설정 (공통 설정 사용)
+TABLES_CONFIG = DAGSettings.get_table_configs()
 
 
 def validate_connections(**context) -> dict[str, Any]:
@@ -127,8 +117,9 @@ def validate_connections(**context) -> dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"연결 검증 실패: {e!s}")
-        raise
+        from common import ErrorHandler
+        error_handler = ErrorHandler(context)
+        error_handler.handle_connection_error("연결 검증", "database", e)
 
 
 def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
@@ -161,9 +152,9 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
             "타겟 테이블 확인 및 생성",
             f"타겟 테이블 {table_config['target']} 존재 확인 및 생성",
         )
-        from postgres_data_copy_dag import ensure_target_table_exists
-
-        ensure_target_table_exists(table_config, **context)
+        
+        # 공통 모듈의 DatabaseOperations 사용
+        db_ops.ensure_target_table_exists(table_config, **context)
         progress.complete_step("타겟 테이블 확인 및 생성")
 
         monitoring.add_checkpoint(
@@ -190,13 +181,68 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
             f"테이블 {table_name}에서 {table_config['target']}로 데이터 복사",
         )
 
-        copy_result = copy_engine.copy_table_data(
-            source_table=table_config["source"],
-            target_table=table_config["target"],
-            primary_keys=table_config["primary_key"],
-            sync_mode=table_config["sync_mode"],
-            batch_size=table_config["batch_size"],
-        )
+        # custom_where 조건 로깅 추가
+        custom_where = table_config.get("custom_where")
+        if custom_where:
+            logger.info(f"커스텀 WHERE 조건 적용: {custom_where}")
+            monitoring.add_checkpoint("WHERE 조건", f"커스텀 조건 적용: {custom_where}")
+        else:
+            logger.info("커스텀 WHERE 조건 없음 - 전체 데이터 처리")
+            monitoring.add_checkpoint("WHERE 조건", "전체 데이터 처리")
+
+        # 청크 방식 설정 가져오기 (헬퍼 함수 사용)
+        chunk_settings = get_chunk_mode_settings(table_config)
+        
+        # 청크 방식 설정 로깅
+        if chunk_settings["chunk_mode"]:
+            logger.info(f"청크 방식 데이터 복사 활성화: {table_name}")
+            logger.info(f"체크포인트: {'활성화' if chunk_settings['enable_checkpoint'] else '비활성화'}")
+            logger.info(f"최대 재시도: {chunk_settings['max_retries']}회")
+            monitoring.add_checkpoint("청크 방식", f"활성화 (체크포인트: {'활성화' if chunk_settings['enable_checkpoint'] else '비활성화'})")
+        else:
+            logger.info(f"기존 방식 데이터 복사: {table_name}")
+            monitoring.add_checkpoint("데이터 복사 방식", "기존 방식 (메모리 누적)")
+        
+        # 성능 최적화 설정에 따라 스트리밍 파이프 또는 기존 방식 선택
+        try:
+            from common.settings import BatchSettings
+            performance_config = BatchSettings.get_performance_optimization_config()
+            use_streaming = performance_config.get("enable_streaming_pipe", False)
+        except ImportError:
+            use_streaming = False
+        
+        if use_streaming:
+            logger.info(f"스트리밍 파이프 방식으로 데이터 복사 시작: {table_name}")
+            monitoring.add_checkpoint("복사 방식", "스트리밍 파이프 (중간 파일 없음)")
+            
+            # 스트리밍 파이프 방식 사용
+            copy_result = copy_engine.copy_data_with_streaming_pipe(
+                source_table=table_config["source"],
+                target_table=table_config["target"],
+                primary_keys=table_config["primary_key"],
+                sync_mode=table_config["sync_mode"],
+                batch_size=table_config["batch_size"],
+                custom_where=table_config.get("custom_where"),
+                chunk_mode=chunk_settings["chunk_mode"],
+                enable_checkpoint=chunk_settings["enable_checkpoint"],
+                max_retries=chunk_settings["max_retries"]
+            )
+        else:
+            logger.info(f"기존 방식으로 데이터 복사 시작: {table_name}")
+            monitoring.add_checkpoint("복사 방식", "기존 방식 (CSV 기반)")
+            
+            # 기존 방식 사용 (청크 방식 지원)
+            copy_result = copy_engine.copy_table_data(
+                source_table=table_config["source"],
+                target_table=table_config["target"],
+                primary_keys=table_config["primary_key"],
+                sync_mode=table_config["sync_mode"],
+                batch_size=table_config["batch_size"],
+                custom_where=table_config.get("custom_where"),
+                chunk_mode=chunk_settings["chunk_mode"],
+                enable_checkpoint=chunk_settings["enable_checkpoint"],
+                max_retries=chunk_settings["max_retries"]
+            )
 
         if copy_result["status"] == "error":
             progress.fail_step("데이터 복사 실행", copy_result["error"])
@@ -247,8 +293,266 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"테이블 {table_config['source']} 복사 실패: {e!s}")
-        raise
+        from common import ErrorHandler
+        error_handler = ErrorHandler(context)
+        error_handler.handle_data_error("테이블 복사", table_config['source'], e)
+
+
+def copy_data_with_xmin_incremental(table_config: dict[str, Any], **context) -> dict[str, Any]:
+    """xmin 기반 증분 데이터 복사"""
+    try:
+        task_id = context["task_instance"].task_id
+        table_name = table_config["source"]
+
+        # 모니터링 시작
+        monitoring = MonitoringManager(f"xmin 증분 복사 - {table_name}")
+        monitoring.start_monitoring()
+
+        # 진행 상황 추적
+        progress = ProgressTracker(7, f"xmin 증분 복사 - {table_name}")
+
+        # 1단계: 데이터베이스 작업 객체 생성
+        progress.start_step(
+            "데이터베이스 작업 객체 생성", "DatabaseOperations 및 DataCopyEngine 초기화"
+        )
+        db_ops = DatabaseOperations(SOURCE_CONN_ID, TARGET_CONN_ID)
+        copy_engine = DataCopyEngine(db_ops)
+        progress.complete_step("데이터베이스 작업 객체 생성")
+
+        monitoring.add_checkpoint(
+            "객체 생성", "DatabaseOperations 및 DataCopyEngine 객체 생성 완료"
+        )
+
+        # 2단계: xmin 기반 처리 가능 여부 확인
+        progress.start_step(
+            "xmin 처리 가능 여부 확인", "xmin 안정성 및 복제 상태 확인"
+        )
+        
+        # xmin 안정성 검증
+        xmin_stability = db_ops.validate_xmin_stability(table_config["source"])
+        monitoring.add_checkpoint("xmin 안정성", f"xmin 안정성: {xmin_stability}")
+        
+        # 복제 상태 확인
+        replication_ok = db_ops.check_replication_status(table_config["source"])
+        monitoring.add_checkpoint("복제 상태", f"복제 상태: {'OK' if replication_ok else 'Replica'}")
+        
+        progress.complete_step("xmin 처리 가능 여부 확인", {
+            "xmin_stability": xmin_stability,
+            "replication_ok": replication_ok
+        })
+
+        # 3단계: 타겟 테이블 준비 (source_xmin 컬럼 포함)
+        progress.start_step(
+            "타겟 테이블 준비", f"타겟 테이블 {table_config['target']} 준비 및 source_xmin 컬럼 확인"
+        )
+        
+        # 기존 테이블 존재 확인 및 생성
+        db_ops.ensure_target_table_exists(table_config, **context)
+        
+        # source_xmin 컬럼 확인 및 추가
+        xmin_column_result = db_ops.ensure_xmin_column_exists(table_config["target"])
+        monitoring.add_checkpoint("source_xmin 컬럼", xmin_column_result)
+        
+        progress.complete_step("타겟 테이블 준비")
+
+        # 4단계: xmin 기반 증분 데이터 복사 실행
+        progress.start_step(
+            "xmin 기반 데이터 복사", f"테이블 {table_name}에서 {table_config['target']}로 xmin 기반 증분 복사"
+        )
+
+        # xmin 기반 복사에서도 청크 방식 설정 (헬퍼 함수 사용)
+        chunk_settings = get_chunk_mode_settings(table_config)
+        
+        # 청크 방식 설정 로깅 (xmin 기반)
+        if chunk_settings["chunk_mode"]:
+            logger.info(f"xmin 기반 청크 방식 데이터 복사 활성화: {table_name}")
+            logger.info(f"체크포인트: {'활성화' if chunk_settings['enable_checkpoint'] else '비활성화'}")
+            logger.info(f"최대 재시도: {chunk_settings['max_retries']}회")
+            monitoring.add_checkpoint("xmin 청크 방식", f"활성화 (체크포인트: {'활성화' if chunk_settings['enable_checkpoint'] else '비활성화'})")
+        else:
+            logger.info(f"xmin 기반 기존 방식 데이터 복사: {table_name}")
+            monitoring.add_checkpoint("xmin 데이터 복사 방식", "기존 방식 (메모리 누적)")
+        
+        copy_result = copy_engine.copy_table_data_with_xmin(
+            source_table=table_config["source"],
+            target_table=table_config["target"],
+            primary_keys=table_config["primary_key"],
+            sync_mode="xmin_incremental",
+            batch_size=table_config.get("batch_size", 5000),  # xmin 처리는 기본값 5000
+            custom_where=table_config.get("custom_where"),
+            # 청크 방식 파라미터 추가 (헬퍼 함수 사용)
+            chunk_mode=chunk_settings["chunk_mode"],
+            enable_checkpoint=chunk_settings["enable_checkpoint"],
+            max_retries=chunk_settings["max_retries"]
+        )
+
+        if copy_result["status"] == "error":
+            progress.fail_step("xmin 기반 데이터 복사", copy_result.get("message", "알 수 없는 오류"))
+            monitoring.add_error(f"xmin 기반 데이터 복사 실패: {copy_result.get('message', '알 수 없는 오류')}")
+            monitoring.stop_monitoring("failed")
+            raise Exception(f"xmin 기반 데이터 복사 실패: {copy_result.get('message', '알 수 없는 오류')}")
+
+        progress.complete_step("xmin 기반 데이터 복사", copy_result)
+
+        monitoring.add_checkpoint(
+            "xmin 기반 데이터 복사", f"xmin 기반 데이터 복사 완료: {copy_result.get('records_processed', 0)}행 처리"
+        )
+        
+        # xmin 관련 정보 추가
+        if "last_xmin" in copy_result and "latest_xmin" in copy_result:
+            monitoring.add_checkpoint(
+                "xmin 범위", f"처리된 xmin 범위: {copy_result['last_xmin']} ~ {copy_result['latest_xmin']}"
+            )
+
+        # 5단계: 데이터 무결성 검증
+        progress.start_step("데이터 무결성 검증", "복사된 데이터의 무결성 검증")
+        validation_result = db_ops.validate_data_integrity(
+            table_config["source"], table_config["target"], table_config["primary_key"]
+        )
+        progress.complete_step("데이터 무결성 검증", validation_result)
+
+        if not validation_result["is_valid"]:
+            monitoring.add_warning(
+                f"데이터 무결성 검증 실패: {validation_result['message']}"
+            )
+
+        # 6단계: xmin 기반 증분 동기화 무결성 검증
+        progress.start_step("xmin 증분 동기화 무결성 검증", "xmin 기반 증분 동기화의 무결성 검증")
+        
+        # 마지막 처리된 xmin 값과 소스의 최신 xmin 값 비교
+        last_processed_xmin = db_ops.get_last_processed_xmin_from_target(table_config["target"])
+        _, latest_source_xmin = db_ops.build_xmin_incremental_condition(
+            table_config["source"], table_config["target"], last_processed_xmin
+        )
+        
+        xmin_integrity = {
+            "last_processed_xmin": last_processed_xmin,
+            "latest_source_xmin": latest_source_xmin,
+            "is_synchronized": last_processed_xmin >= latest_source_xmin if latest_source_xmin > 0 else True
+        }
+        
+        progress.complete_step("xmin 증분 동기화 무결성 검증", xmin_integrity)
+        
+        if not xmin_integrity["is_synchronized"]:
+            monitoring.add_warning(
+                f"xmin 동기화 지연: 마지막 처리 xmin({last_processed_xmin}) < 최신 소스 xmin({latest_source_xmin})"
+            )
+
+        # 7단계: 모니터링 완료
+        progress.complete_step("모니터링 완료")
+        monitoring.add_checkpoint(
+            "작업 완료", f"테이블 {table_name} xmin 기반 증분 복사 작업 완료"
+        )
+        monitoring.stop_monitoring("completed")
+
+        return {
+            "status": "success",
+            "table_name": table_name,
+            "copy_result": copy_result,
+            "validation_result": validation_result,
+            "xmin_integrity": xmin_integrity,
+            "monitoring_summary": monitoring.get_summary(),
+            "progress_summary": progress.get_summary(),
+        }
+
+    except Exception as e:
+        from common import ErrorHandler
+        error_handler = ErrorHandler(context)
+        error_handler.handle_processing_error("xmin 기반 증분 복사", "xmin_data_copy", e)
+
+
+def validate_xmin_incremental_integrity(table_config: dict[str, Any], **context) -> dict[str, Any]:
+    """xmin 기반 증분 동기화 무결성 검증"""
+    try:
+        task_id = context["task_instance"].task_id
+        table_name = table_config["source"]
+
+        # 모니터링 시작
+        monitoring = MonitoringManager(f"xmin 무결성 검증 - {table_name}")
+        monitoring.start_monitoring()
+
+        # 진행 상황 추적
+        progress = ProgressTracker(4, f"xmin 무결성 검증 - {table_name}")
+
+        # 1단계: 데이터베이스 작업 객체 생성
+        progress.start_step(
+            "데이터베이스 작업 객체 생성", "DatabaseOperations 초기화"
+        )
+        db_ops = DatabaseOperations(SOURCE_CONN_ID, TARGET_CONN_ID)
+        progress.complete_step("데이터베이스 작업 객체 생성")
+
+        # 2단계: xmin 상태 확인
+        progress.start_step(
+            "xmin 상태 확인", "소스 및 타겟 테이블의 xmin 상태 확인"
+        )
+        
+        # 소스 테이블 xmin 상태
+        source_xmin_stability = db_ops.validate_xmin_stability(table_config["source"])
+        monitoring.add_checkpoint("소스 xmin 안정성", f"안정성: {source_xmin_stability}")
+        
+        # 타겟 테이블 마지막 처리 xmin
+        last_processed_xmin = db_ops.get_last_processed_xmin_from_target(table_config["target"])
+        monitoring.add_checkpoint("마지막 처리 xmin", f"값: {last_processed_xmin}")
+        
+        # 소스 테이블 최신 xmin
+        _, latest_source_xmin = db_ops.build_xmin_incremental_condition(
+            table_config["source"], table_config["target"], last_processed_xmin
+        )
+        monitoring.add_checkpoint("최신 소스 xmin", f"값: {latest_source_xmin}")
+        
+        progress.complete_step("xmin 상태 확인", {
+            "source_stability": source_xmin_stability,
+            "last_processed": last_processed_xmin,
+            "latest_source": latest_source_xmin
+        })
+
+        # 3단계: 무결성 검증
+        progress.start_step(
+            "무결성 검증", "xmin 기반 증분 동기화 무결성 검증"
+        )
+        
+        # 동기화 상태 확인
+        is_synchronized = last_processed_xmin >= latest_source_xmin if latest_source_xmin > 0 else True
+        sync_gap = max(0, latest_source_xmin - last_processed_xmin) if latest_source_xmin > 0 else 0
+        
+        # 데이터 일치 여부 확인
+        data_integrity = db_ops.validate_data_integrity(
+            table_config["source"], table_config["target"], table_config["primary_key"]
+        )
+        
+        integrity_result = {
+            "is_synchronized": is_synchronized,
+            "sync_gap": sync_gap,
+            "last_processed_xmin": last_processed_xmin,
+            "latest_source_xmin": latest_source_xmin,
+            "data_integrity": data_integrity,
+            "overall_status": "healthy" if (is_synchronized and data_integrity["is_valid"]) else "warning"
+        }
+        
+        progress.complete_step("무결성 검증", integrity_result)
+        
+        # 4단계: 모니터링 완료
+        progress.complete_step("모니터링 완료")
+        
+        if integrity_result["overall_status"] == "healthy":
+            monitoring.add_checkpoint("무결성 상태", "모든 검증 통과 - 정상 상태")
+            monitoring.stop_monitoring("completed")
+        else:
+            monitoring.add_warning(f"무결성 경고: 동기화 지연({sync_gap}) 또는 데이터 불일치")
+            monitoring.stop_monitoring("warning")
+
+        return {
+            "status": "success",
+            "table_name": table_name,
+            "integrity_result": integrity_result,
+            "monitoring_summary": monitoring.get_summary(),
+            "progress_summary": progress.get_summary(),
+        }
+
+    except Exception as e:
+        from common import ErrorHandler
+        error_handler = ErrorHandler(context)
+        error_handler.handle_processing_error("xmin 무결성 검증", "xmin_integrity_validation", e)
 
 
 def execute_dbt_pipeline(**context) -> dict[str, Any]:
@@ -346,21 +650,21 @@ def execute_dbt_pipeline(**context) -> dict[str, Any]:
 
 
 def generate_copy_tasks():
-    """테이블별 복사 태스크 생성"""
-    copy_tasks = []
-
-    for i, table_config in enumerate(TABLES_CONFIG):
-        task_id = f"copy_table_{i}_{table_config['source'].replace('.', '_')}"
-
-        task = PythonOperator(
-            task_id=task_id,
-            python_callable=copy_table_data,
-            op_kwargs={"table_config": table_config},
-            dag=dag,
-        )
-
-        copy_tasks.append(task)
-
+    """테이블별 복사 태스크 생성 (TaskFactory 사용)"""
+    from common import TaskFactory
+    
+    copy_tasks = TaskFactory.create_copy_tasks(
+        table_configs=TABLES_CONFIG,
+        copy_function=copy_table_data,
+        dag=dag,
+        task_prefix="copy_table"
+    )
+    
+    # 디버깅: 생성된 태스크 정보 출력
+    logger.info(f"생성된 복사 태스크 수: {len(copy_tasks)}")
+    for i, task in enumerate(copy_tasks):
+        logger.info(f"태스크 {i+1}: {task.task_id} -> {task.python_callable.__name__}")
+    
     return copy_tasks
 
 
@@ -375,9 +679,17 @@ dbt_pipeline_task = PythonOperator(
     task_id="execute_dbt_pipeline", python_callable=execute_dbt_pipeline, dag=dag
 )
 
-# 태스크 의존성 설정
-validate_connections_task >> copy_tasks
-
-# 모든 복사 태스크가 완료된 후 dbt 파이프라인 실행
-for copy_task in copy_tasks:
-    copy_task >> dbt_pipeline_task
+# 태스크 의존성 설정 - 순차 실행을 위한 체인 생성
+if copy_tasks:
+    # 첫 번째 복사 태스크는 연결 검증 후 실행
+    validate_connections_task >> copy_tasks[0]
+    
+    # 중간 복사 태스크들은 순차적으로 연결
+    for i in range(len(copy_tasks) - 1):
+        copy_tasks[i] >> copy_tasks[i + 1]
+    
+    # 마지막 복사 태스크는 dbt 파이프라인 실행
+    copy_tasks[-1] >> dbt_pipeline_task
+else:
+    # 복사 태스크가 없는 경우 직접 연결
+    validate_connections_task >> dbt_pipeline_task
