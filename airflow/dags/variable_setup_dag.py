@@ -1,10 +1,12 @@
 """
 DAG for setting up Airflow Variables for table configurations and copy methods
+- 모든 설정값을 Airflow Variables로 관리
+- settings.py는 이 설정을 가져오는 기능만 제공
 """
 
 import json
 from datetime import datetime
-import os # Added for os.getenv
+import os
 
 from airflow import DAG
 from airflow.models import Variable
@@ -92,6 +94,14 @@ DAG_CONFIGS = {
         "avg_execution_time_minutes": None,
         "success_rate_percent": None
     }
+}
+
+# Connection configurations (연결 설정)
+CONNECTION_CONFIGS = {
+    "source_postgres": "fs2_postgres",
+    "target_postgres": "postgres_default",
+    "airflow_db": "airflow_db",
+    "digitalocean_postgres": "digitalocean_postgres"
 }
 
 # Table configurations (테이블별 설정 - copy_method와 sync_mode 통합)
@@ -217,6 +227,59 @@ TABLE_CONFIGS = {
     }
 }
 
+# EDI table configurations (EDI 테이블 설정)
+EDI_TABLE_CONFIGS = [
+    {
+        "source": "m23.edi_690",
+        "target": "raw_data.edi_690",
+        "primary_key": ["eventcd", "eventid", "optionid", "serialid", "scexhid", "sedolid"],
+        "sync_mode": "incremental_sync",
+        "batch_size": 10000,
+        "incremental_field": "changed",
+        "incremental_field_type": "yyyymmdd",
+        "custom_where": "changed >= '20250812'",
+        "where_clause": "changed >= '20250812'",
+        "chunk_mode": True,
+        "enable_checkpoint": True,
+        "max_retries": 3,
+        "description": "EDI 690 이벤트 데이터 - 청크 방식으로 안전하게 처리"
+    }
+]
+
+# Schedule configurations (스케줄 설정)
+SCHEDULE_CONFIGS = {
+    "main_copy": "0 3,16 * * *",  # 매일 오전 3시, 오후 4시
+    "edi_copy": "0 9 * * *",       # 매일 9시
+    "daily": "0 2 * * *",          # 매일 오전 2시
+    "hourly": "0 * * * *",         # 매시간
+    "manual": "@once",             # 수동 실행
+}
+
+# Environment configurations (환경별 설정)
+ENVIRONMENT_CONFIGS = {
+    "development": {
+        "debug": True,
+        "log_level": "DEBUG",
+        "email_notifications": False,
+        "retries": 1,
+        "batch_size": 1000,
+    },
+    "staging": {
+        "debug": False,
+        "log_level": "INFO",
+        "email_notifications": True,
+        "retries": 2,
+        "batch_size": 5000,
+    },
+    "production": {
+        "debug": False,
+        "log_level": "WARNING",
+        "email_notifications": True,
+        "retries": 3,
+        "batch_size": 10000,
+    }
+}
+
 # Sync mode configurations (동기화 모드별 설정 - copy_method와 sync_mode 통합)
 SYNC_MODE_CONFIGS = {
     "full_sync": {
@@ -236,7 +299,7 @@ SYNC_MODE_CONFIGS = {
     }
 }
 
-# Execution monitoring configurations (새로 추가)
+# Execution monitoring configurations (실행 모니터링 설정)
 EXECUTION_MONITORING_CONFIGS = {
     "monitoring_enabled": True,
     "alert_thresholds": {
@@ -341,12 +404,108 @@ CHUNK_MODE_CONFIGS = {
     }
 }
 
+# Worker configurations (워커 설정)
+WORKER_CONFIGS = {
+    "default_workers": 4,
+    "max_workers": 4,
+    "min_workers": 2,
+    "worker_timeout_seconds": 600,
+    "worker_memory_limit_mb": 1024,
+    "description": "워커 설정 - 성능 테스트 결과 기반 최적값"
+}
+
+# Performance optimization configurations (성능 최적화 설정)
+PERFORMANCE_CONFIGS = {
+    "enable_session_optimization": True,
+    "enable_unlogged_staging": True,
+    "enable_auto_analyze": True,
+    "enable_auto_index": True,
+    "enable_streaming_pipe": True,
+    "session_parameters": {
+        "synchronous_commit": "off",
+        "statement_timeout": "0",
+        "work_mem": "128MB",
+        "lock_timeout": "300s",
+    },
+    "batch_size_optimization": {
+        "large_table_threshold": 1000000,  # 100만 행 이상
+        "large_table_batch_size": 50000,   # 5만 행
+        "medium_table_threshold": 100000,  # 10만 행 이상
+        "medium_table_batch_size": 20000,  # 2만 행
+        "small_table_batch_size": 10000,   # 1만 행
+    },
+    "parallel_processing": {
+        "max_concurrent_tables": 2,        # 동시 실행 테이블 수
+        "max_concurrent_chunks": 4,        # 동시 실행 청크 수
+        "pool_name": "postgres_copy_pool",
+    },
+    "description": "성능 최적화 설정 - 환경변수로 오버라이드 가능"
+}
+
+# Table batch size configurations (테이블별 배치 크기 설정)
+TABLE_BATCH_CONFIGS = {
+    "인포맥스종목마스터": 10000,
+    "ff_v3_ff_sec_entity": 20000,
+    "edi_690": 10000,
+    "sym_v1_sym_ticker_exchange": 10000,
+    "sym_v1_sym_coverage": 5000,
+    "digitalocean_users": 10000,
+    "digitalocean_orders": 5000,
+    "description": "테이블별 최적화된 배치 크기 설정"
+}
+
+# Default DAG settings (기본 DAG 설정)
+DEFAULT_DAG_CONFIG = {
+    "owner": "data_team",
+    "depends_on_past": False,
+    "email_on_failure": True,
+    "email_on_retry": False,
+    "retries": 2,
+    "retry_delay_minutes": 5,
+    "email": ["admin@example.com"],
+    "start_date": "2024-01-01",
+    "catchup": False,
+    "max_active_runs": 1,
+    "description": "기본 DAG 설정 - 모든 DAG에 적용"
+}
+
+# Default tags (기본 태그)
+DEFAULT_TAGS = ["postgres", "data-copy", "etl", "refactored"]
+
+
+def setup_connection_variables(**context):
+    """Set up connection configuration variables"""
+    Variable.set("connection_configs", json.dumps(CONNECTION_CONFIGS, indent=2))
+    print(f"Set connection_configs variable with {len(CONNECTION_CONFIGS)} connections")
+    return f"Successfully set {len(CONNECTION_CONFIGS)} connection configurations"
+
 
 def setup_table_variables(**context):
     """Set up table configuration variables"""
     Variable.set("table_configs", json.dumps(TABLE_CONFIGS, indent=2))
     print(f"Set table_configs variable with {len(TABLE_CONFIGS)} tables")
     return f"Successfully set {len(TABLE_CONFIGS)} table configurations"
+
+
+def setup_edi_table_variables(**context):
+    """Set up EDI table configuration variables"""
+    Variable.set("edi_table_configs", json.dumps(EDI_TABLE_CONFIGS, indent=2))
+    print(f"Set edi_table_configs variable with {len(EDI_TABLE_CONFIGS)} EDI tables")
+    return f"Successfully set {len(EDI_TABLE_CONFIGS)} EDI table configurations"
+
+
+def setup_schedule_variables(**context):
+    """Set up schedule configuration variables"""
+    Variable.set("schedule_configs", json.dumps(SCHEDULE_CONFIGS, indent=2))
+    print(f"Set schedule_configs variable with {len(SCHEDULE_CONFIGS)} schedules")
+    return f"Successfully set {len(SCHEDULE_CONFIGS)} schedule configurations"
+
+
+def setup_environment_variables(**context):
+    """Set up environment configuration variables"""
+    Variable.set("environment_configs", json.dumps(ENVIRONMENT_CONFIGS, indent=2))
+    print(f"Set environment_configs variable with {len(ENVIRONMENT_CONFIGS)} environments")
+    return f"Successfully set {len(ENVIRONMENT_CONFIGS)} environment configurations"
 
 
 def setup_sync_mode_variables(**context):
@@ -386,6 +545,35 @@ def setup_chunk_mode_variables(**context):
     return "Successfully set chunk mode configurations"
 
 
+def setup_worker_variables(**context):
+    """Set up worker configuration variables"""
+    Variable.set("worker_configs", json.dumps(WORKER_CONFIGS, indent=2))
+    print(f"Set worker_configs variable with worker configurations")
+    return "Successfully set worker configurations"
+
+
+def setup_performance_variables(**context):
+    """Set up performance optimization configuration variables"""
+    Variable.set("performance_configs", json.dumps(PERFORMANCE_CONFIGS, indent=2))
+    print(f"Set performance_configs variable with performance configurations")
+    return "Successfully set performance configurations"
+
+
+def setup_table_batch_variables(**context):
+    """Set up table batch size configuration variables"""
+    Variable.set("table_batch_configs", json.dumps(TABLE_BATCH_CONFIGS, indent=2))
+    print(f"Set table_batch_configs variable with table batch configurations")
+    return "Successfully set table batch configurations"
+
+
+def setup_default_dag_variables(**context):
+    """Set up default DAG configuration variables"""
+    Variable.set("default_dag_config", json.dumps(DEFAULT_DAG_CONFIG, indent=2))
+    Variable.set("default_tags", json.dumps(DEFAULT_TAGS, indent=2))
+    print("Set default DAG configuration variables")
+    return "Successfully set default DAG configuration variables"
+
+
 def setup_dag_variables(**context):
     """Set up DAG configuration variables"""
     Variable.set("dag_configs", json.dumps(DAG_CONFIGS, indent=2))
@@ -403,38 +591,61 @@ def setup_monitoring_variables(**context):
 def verify_variables(**context):
     """Verify all variables are set correctly"""
     try:
-        table_configs = json.loads(Variable.get("table_configs"))
-        sync_mode_configs = json.loads(Variable.get("sync_mode_configs"))
-        dbt_configs = json.loads(Variable.get("dbt_configs"))
-        chunk_mode_configs = json.loads(Variable.get("chunk_mode_configs"))
-        dag_configs = json.loads(Variable.get("dag_configs"))
-        monitoring_configs = json.loads(Variable.get("execution_monitoring_configs"))
+        # 모든 설정 변수 검증
+        variables_to_check = [
+            "connection_configs",
+            "table_configs", 
+            "edi_table_configs",
+            "schedule_configs",
+            "environment_configs",
+            "sync_mode_configs",
+            "dbt_configs",
+            "chunk_mode_configs",
+            "worker_configs",
+            "performance_configs",
+            "table_batch_configs",
+            "default_dag_config",
+            "default_tags",
+            "dag_configs",
+            "execution_monitoring_configs"
+        ]
+        
+        verification_results = {}
+        for var_name in variables_to_check:
+            try:
+                var_value = Variable.get(var_name, deserialize_json=True, default_var=None)
+                if var_value:
+                    verification_results[var_name] = f"✅ 설정됨 ({len(var_value) if isinstance(var_value, (dict, list)) else 'N/A'})"
+                else:
+                    verification_results[var_name] = "❌ 설정되지 않음"
+            except Exception as e:
+                verification_results[var_name] = f"❌ 오류: {str(e)}"
 
-        print("✅ All variables verified successfully:")
-        print(f"  - Table configs: {len(table_configs)} tables")
-        print(f"  - Sync modes: {len(sync_mode_configs)} modes")
-        print(f"  - dbt configs: {len(dbt_configs)} configurations")
-        print(f"  - Chunk mode configs: {len(chunk_mode_configs)} configurations")
-        print(f"  - DAG configs: {len(dag_configs)} DAGs")
-        print(f"  - Monitoring configs: {len(monitoring_configs)} monitoring configurations")
+        print("🔍 모든 설정 변수 검증 결과:")
+        for var_name, result in verification_results.items():
+            print(f"  - {var_name}: {result}")
         
         # 청크 방식 설정 검증
-        print("\n🔍 Chunk mode configuration verification:")
-        for table_name, config in table_configs.items():
-            chunk_mode = config.get("chunk_mode", True)
-            enable_checkpoint = config.get("enable_checkpoint", True)
-            max_retries = config.get("max_retries", 3)
-            sync_mode = config.get("sync_mode", "unknown")
-            
-            print(f"  - {table_name}:")
-            print(f"    * Chunk mode: {'✅ 활성화' if chunk_mode else '❌ 비활성화'}")
-            print(f"    * Checkpoint: {'✅ 활성화' if enable_checkpoint else '❌ 비활성화'}")
-            print(f"    * Max retries: {max_retries}")
-            print(f"    * Sync mode: {sync_mode}")
-            
-            # 설정 유효성 검증
-            if enable_checkpoint and not chunk_mode:
-                print(f"    ⚠️  경고: 체크포인트는 청크 모드가 활성화된 경우에만 사용 가능")
+        print("\n🔍 청크 방식 설정 검증:")
+        try:
+            table_configs = json.loads(Variable.get("table_configs"))
+            for table_name, config in table_configs.items():
+                chunk_mode = config.get("chunk_mode", True)
+                enable_checkpoint = config.get("enable_checkpoint", True)
+                max_retries = config.get("max_retries", 3)
+                sync_mode = config.get("sync_mode", "unknown")
+                
+                print(f"  - {table_name}:")
+                print(f"    * Chunk mode: {'✅ 활성화' if chunk_mode else '❌ 비활성화'}")
+                print(f"    * Checkpoint: {'✅ 활성화' if enable_checkpoint else '❌ 비활성화'}")
+                print(f"    * Max retries: {max_retries}")
+                print(f"    * Sync mode: {sync_mode}")
+                
+                # 설정 유효성 검증
+                if enable_checkpoint and not chunk_mode:
+                    print(f"    ⚠️  경고: 체크포인트는 청크 모드가 활성화된 경우에만 사용 가능")
+        except Exception as e:
+            print(f"  ❌ 테이블 설정 검증 실패: {e}")
 
         return "All variables verified successfully"
     except Exception as e:
@@ -446,9 +657,33 @@ def verify_variables(**context):
 dag = DAG(**dag_config)
 
 # Create tasks
+setup_connections_task = PythonOperator(
+    task_id="setup_connection_variables",
+    python_callable=setup_connection_variables,
+    dag=dag,
+)
+
 setup_tables_task = PythonOperator(
     task_id="setup_table_variables",
     python_callable=setup_table_variables,
+    dag=dag,
+)
+
+setup_edi_tables_task = PythonOperator(
+    task_id="setup_edi_table_variables",
+    python_callable=setup_edi_table_variables,
+    dag=dag,
+)
+
+setup_schedules_task = PythonOperator(
+    task_id="setup_schedule_variables",
+    python_callable=setup_schedule_variables,
+    dag=dag,
+)
+
+setup_environments_task = PythonOperator(
+    task_id="setup_environment_variables",
+    python_callable=setup_environment_variables,
     dag=dag,
 )
 
@@ -470,6 +705,30 @@ setup_chunk_mode_task = PythonOperator(
     dag=dag,
 )
 
+setup_worker_task = PythonOperator(
+    task_id="setup_worker_variables",
+    python_callable=setup_worker_variables,
+    dag=dag,
+)
+
+setup_performance_task = PythonOperator(
+    task_id="setup_performance_variables",
+    python_callable=setup_performance_variables,
+    dag=dag,
+)
+
+setup_table_batch_task = PythonOperator(
+    task_id="setup_table_batch_variables",
+    python_callable=setup_table_batch_variables,
+    dag=dag,
+)
+
+setup_default_dag_task = PythonOperator(
+    task_id="setup_default_dag_variables",
+    python_callable=setup_default_dag_variables,
+    dag=dag,
+)
+
 setup_dag_task = PythonOperator(
     task_id="setup_dag_variables",
     python_callable=setup_dag_variables,
@@ -488,12 +747,20 @@ verify_task = PythonOperator(
     dag=dag,
 )
 
-# Set task dependencies
+# Set task dependencies (순차적 실행)
 (
-    setup_tables_task
+    setup_connections_task
+    >> setup_tables_task
+    >> setup_edi_tables_task
+    >> setup_schedules_task
+    >> setup_environments_task
     >> setup_sync_methods_task
     >> setup_dbt_task
     >> setup_chunk_mode_task
+    >> setup_worker_task
+    >> setup_performance_task
+    >> setup_table_batch_task
+    >> setup_default_dag_task
     >> setup_dag_task
     >> setup_monitoring_task
     >> verify_task
