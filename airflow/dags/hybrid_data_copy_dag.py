@@ -20,7 +20,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from common.data_copy_engine import DataCopyEngine
 from common.database_operations import DatabaseOperations
 from common.monitoring import MonitoringManager, ProgressTracker
-from common.error_handler import ErrorHandler
+
 from common.connection_manager import ConnectionManager
 from common.dag_config_manager import DAGConfigManager
 from common.settings import DAGSettings, BatchSettings
@@ -55,7 +55,7 @@ HYBRID_TABLES_CONFIG = DAGConfigManager.get_table_configs("hybrid_data_copy_dag"
 data_copy_engine = DataCopyEngine()
 db_operations = DatabaseOperations()
 monitoring_manager = MonitoringManager()
-error_handler = ErrorHandler()
+
 
 def validate_all_connections(**context) -> bool:
     """모든 연결 유효성 검사"""
@@ -132,7 +132,7 @@ def copy_table_to_targets(table_config: dict, **context) -> bool:
                     
             except Exception as e:
                 logger.error(f"❌ {source_table} -> {target_config['table']} 복사 중 오류: {str(e)}")
-                error_handler.handle_error(e, context)
+                logger.error(f"오류 발생: {str(e)}")
         
         if success_count == total_targets:
             logger.info(f"✅ {source_table}: 모든 타겟으로 복사 완료 ({success_count}/{total_targets})")
@@ -143,7 +143,7 @@ def copy_table_to_targets(table_config: dict, **context) -> bool:
             
     except Exception as e:
         logger.error(f"❌ 테이블 복사 중 오류 발생: {source_table} - {str(e)}")
-        error_handler.handle_error(e, context)
+        logger.error(f"오류 발생: {str(e)}")
         return False
 
 def verify_hybrid_data_integrity(**context) -> bool:
@@ -192,7 +192,7 @@ def verify_hybrid_data_integrity(**context) -> bool:
         
     except Exception as e:
         logger.error(f"❌ 하이브리드 데이터 무결성 검증 중 오류 발생: {str(e)}")
-        error_handler.handle_error(e, context)
+        logger.error(f"오류 발생: {str(e)}")
         return False
 
 def generate_copy_summary(**context) -> bool:
@@ -239,7 +239,7 @@ def generate_copy_summary(**context) -> bool:
         
     except Exception as e:
         logger.error(f"❌ 복사 작업 요약 생성 중 오류 발생: {str(e)}")
-        error_handler.handle_error(e, context)
+        logger.error(f"오류 발생: {str(e)}")
         return False
 
 # 태스크 정의

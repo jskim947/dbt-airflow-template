@@ -22,7 +22,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from common.data_copy_engine import DataCopyEngine
 from common.database_operations import DatabaseOperations
 from common.monitoring import MonitoringManager, ProgressTracker
-from common.error_handler import ErrorHandler
+
 from common.connection_manager import ConnectionManager
 from common.dag_config_manager import DAGConfigManager
 from common.settings import DAGSettings, BatchSettings
@@ -60,7 +60,7 @@ DIGITALOCEAN_TABLES_CONFIG = DAGConfigManager.get_table_configs("digitalocean_da
 data_copy_engine = DataCopyEngine()
 db_operations = DatabaseOperations()
 monitoring_manager = MonitoringManager()
-error_handler = ErrorHandler()
+
 
 def validate_connections(**context) -> bool:
     """연결 유효성 검사"""
@@ -112,7 +112,7 @@ def copy_table_data(table_config: dict, **context) -> bool:
             
     except Exception as e:
         logger.error(f"❌ 테이블 복사 중 오류 발생: {table_config['source']} - {str(e)}")
-        error_handler.handle_error(e, context)
+        logger.error(f"오류 발생: {str(e)}")
         return False
 
 def run_dbt_snapshot(**context) -> bool:
