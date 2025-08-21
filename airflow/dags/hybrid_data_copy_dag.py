@@ -24,13 +24,21 @@ from common.monitoring import MonitoringManager, ProgressTracker
 from common.connection_manager import ConnectionManager
 from common.dag_config_manager import DAGConfigManager
 from common.settings import DAGSettings, BatchSettings
-from common.dag_utils import UtilsDAGConfigManager
+
 
 # 로거 설정
 logger = logging.getLogger(__name__)
 
 # DAG 기본 설정
-default_args = DAGSettings.get_default_args()
+default_args = {
+    "owner": "data_team",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "email": ["admin@example.com"],
+}
 
 # DAG 정의
 dag = DAG(

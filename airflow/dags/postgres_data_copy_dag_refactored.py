@@ -56,11 +56,15 @@ logger = logging.getLogger(__name__)
 from common import DAGConfigManager, DAGSettings, ConnectionManager
 
 # DAG 기본 설정
-default_args = DAGConfigManager.get_default_args(
-    owner=DAGSettings.DEFAULT_DAG_CONFIG["owner"],
-    retries=DAGSettings.DEFAULT_DAG_CONFIG["retries"],
-    retry_delay_minutes=DAGSettings.DEFAULT_DAG_CONFIG["retry_delay_minutes"]
-)
+default_args = {
+    "owner": "data_team",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "email": ["admin@example.com"],
+}
 
 # DAG 정의
 dag = DAGConfigManager.create_dag(

@@ -8,6 +8,7 @@ DAG 설정과 연결 정보를 관리하는 공통 설정 모듈
 import os
 from typing import Any, Dict, List
 import json
+from datetime import timedelta
 
 from airflow.models import Variable
 
@@ -145,6 +146,8 @@ class DAGSettings:
                 })
             
             return base_config
+
+
 
     @classmethod
     def get_chunk_mode_configs(cls) -> Dict[str, Any]:
