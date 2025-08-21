@@ -22,7 +22,6 @@ from common.database_operations import DatabaseOperations
 
 logger = logging.getLogger(__name__)
 
-
 class DataCopyEngine:
     """데이터 복사 엔진 클래스"""
     
@@ -715,8 +714,6 @@ class DataCopyEngine:
             if staging_table:
                 self.cleanup_staging_table(staging_table)
 
-
-
     def _optimize_target_session(self, hook) -> None:
         """
         타겟 세션에서 성능 최적화를 위한 세션 파라미터 설정
@@ -1404,150 +1401,6 @@ class DataCopyEngine:
             logger.error(f"psql 바이너리 파이프라인 복사 실패: {e}")
             return 0
 
-    def _export_to_csv_chunked(
-        self, 
-        table_name: str, 
-        csv_path: str, 
-        where_clause: str | None, 
-        batch_size: int, 
-        order_by_field: str | None, 
-        enable_checkpoint: bool = True, 
-        max_retries: int = 3
-    ) -> int:
-        """
-        세션 관리와 트랜잭션 기반 청크 처리 (메모리 누적 없음)
-        """
-        try:
-            # 전체 행 수 조회
-            total_count = self.db_ops.get_table_row_count(table_name, where_clause=where_clause)
-            
-            if total_count == 0:
-                logger.warning(f"테이블 {table_name}에 데이터가 없습니다.")
-                return 0
-
-            # 체크포인트에서 복구 시도
-            start_offset, total_exported = 0, 0
-            if enable_checkpoint:
-                start_offset, total_exported = self._resume_from_checkpoint(table_name, csv_path)
-            
-            # 성능 모니터링 변수
-            session_refresh_interval = 200  # 200개 청크마다 세션 갱신 (빈도 감소)
-            chunk_count = 0
-            current_batch_size = batch_size
-            performance_metrics = {
-                'start_time': time.time(),
-                'chunk_processing_times': [],
-                'memory_usage_history': [],
-                'session_refresh_count': 0
-            }
-            
-            # 테이블 컬럼 정보 가져오기
-            columns = self._get_table_columns(table_name)
-            
-            with open(csv_path, 'a' if start_offset > 0 else 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                
-                # 헤더는 처음에만 쓰기
-                if start_offset == 0:
-                    writer.writerow(columns)
-                
-                offset = start_offset
-                
-                while offset < total_count:
-                    chunk_start_time = time.time()
-                    try:
-                        # 세션 상태 확인 및 갱신 (더 효율적으로)
-                        if chunk_count % session_refresh_interval == 0:
-                            # 세션 상태가 실제로 불량한 경우에만 갱신
-                            if not self._check_session_health():
-                                self._refresh_database_session()
-                                logger.info(f"데이터베이스 세션 갱신 (청크 {chunk_count})")
-                                performance_metrics['session_refresh_count'] += 1
-                            else:
-                                logger.debug(f"세션 상태 정상, 갱신 생략 (청크 {chunk_count})")
-                        
-                        # 트랜잭션 기반 청크 처리
-                        batch_result = self._process_single_chunk_with_transaction(
-                            table_name, where_clause, current_batch_size, offset, order_by_field, writer, max_retries
-                        )
-                        
-                        if batch_result['success']:
-                            # 성능 메트릭 수집
-                            chunk_time = time.time() - chunk_start_time
-                            performance_metrics['chunk_processing_times'].append(chunk_time)
-                            
-                            total_exported += batch_result['rows_processed']
-                            offset += current_batch_size
-                            chunk_count += 1
-                            
-                            # 체크포인트 저장
-                            if enable_checkpoint:
-                                self._save_checkpoint(table_name, offset, total_exported, csv_path)
-                            
-                            # 진행률 로깅
-                            logger.info(f"청크 처리 진행률: {total_exported}/{total_count}")
-                            
-                            # 메모리 사용량 모니터링
-                            memory_usage = self._check_memory_usage()
-                            performance_metrics['memory_usage_history'].append(memory_usage)
-                            
-                            # 배치 크기 동적 조정
-                            if chunk_count % 50 == 0:  # 50개 청크마다 조정 (빈도 감소)
-                                new_batch_size = self._optimize_batch_size_dynamically(
-                                    current_batch_size, memory_usage, chunk_time, self._check_session_health()
-                                )
-                                if new_batch_size != current_batch_size:
-                                    logger.info(f"배치 크기 동적 조정: {current_batch_size} → {new_batch_size}")
-                                    current_batch_size = new_batch_size
-                            
-                            # 성능 모니터링 로깅
-                            if chunk_count % 500 == 0:  # 500개 청크마다 로깅 (빈도 감소)
-                                self._log_performance_metrics(performance_metrics, chunk_count, total_exported, total_count)
-                        else:
-                                                        # 청크 실패 시 오류 처리
-                            error_action = self._handle_chunk_error(batch_result['error'], offset, current_batch_size)
-                            if error_action == 'skip':
-                                offset += current_batch_size
-                                logger.warning(f"청크 건너뛰기 (offset {offset})")
-                            elif error_action == 'retry':
-                                continue  # 재시도
-                            else:
-                                raise Exception(f"치명적 오류 발생: {batch_result['error']}")
-                        
-                    except (psycopg2.OperationalError, psycopg2.InterfaceError) as db_error:
-                        # 데이터베이스 연결 오류 시 세션 재생성
-                        logger.error(f"데이터베이스 오류 발생: {db_error}")
-                        self._refresh_database_session()
-                        
-                        # 실패한 청크 재시도
-                        continue
-                        
-                    except Exception as chunk_error:
-                        # 기타 오류 시 로깅 및 재시도
-                        logger.error(f"청크 처리 오류 (offset {offset}): {chunk_error}")
-                        error_action = self._handle_chunk_error(chunk_error, offset, current_batch_size)
-                        if error_action == 'skip':
-                            offset += current_batch_size
-                        elif error_action == 'retry':
-                                continue
-                        else:
-                            raise chunk_error
-            
-            # 체크포인트 정리
-            if enable_checkpoint:
-                self._cleanup_checkpoint(csv_path)
-            
-            # 최종 성능 리포트
-            total_time = time.time() - performance_metrics['start_time']
-            self._log_final_performance_report(performance_metrics, total_exported, total_time)
-            
-            logger.info(f"청크 방식 CSV 내보내기 완료: {table_name} -> {csv_path}, 총 {total_exported}행")
-            return total_exported
-            
-        except Exception as e:
-            logger.error(f"청크 방식 CSV 내보내기 실패: {e}")
-            raise
-
     def _export_to_csv_legacy(
         self, 
         table_name: str, 
@@ -1880,94 +1733,6 @@ class DataCopyEngine:
                 logger.info("기본 가비지 컬렉션 수행")
             except Exception:
                 pass
-
-    def _process_single_chunk_with_transaction(
-        self, 
-        table_name: str, 
-        where_clause: str | None, 
-        batch_size: int, 
-        offset: int, 
-        order_by_field: str | None, 
-        writer: csv.writer, 
-        max_retries: int = 3
-    ) -> dict:
-        """
-        트랜잭션 기반 청크 처리 (개선된 버전)
-        """
-        retry_count = 0
-        start_time = time.time()
-        
-        while retry_count < max_retries:
-            try:
-                # 트랜잭션 시작
-                with self.source_hook.get_conn() as conn:
-                    # 트랜잭션 설정
-                    conn.autocommit = False
-                    
-                    with conn.cursor() as cursor:
-                        # 청크 데이터 조회
-                        query = self._build_chunk_query(table_name, where_clause, batch_size, offset, order_by_field)
-                        
-                        # 쿼리 실행 시간 측정
-                        query_start = time.time()
-                        cursor.execute(query)
-                        query_time = time.time() - query_start
-                        
-                        # 데이터 처리 및 CSV 쓰기
-                        rows_processed = 0
-                        csv_write_start = time.time()
-                        
-                        for row in cursor:
-                            writer.writerow(row)
-                            rows_processed += 1
-                        
-                        csv_write_time = time.time() - csv_write_start
-                        
-                        # 트랜잭션 커밋
-                        commit_start = time.time()
-                        conn.commit()
-                        commit_time = time.time() - commit_start
-                        
-                        # 성능 로깅
-                        total_time = time.time() - start_time
-                        logger.debug(f"청크 처리 성공: {rows_processed}행, 쿼리: {query_time:.2f}초, CSV: {csv_write_time:.2f}초, 커밋: {commit_time:.2f}초, 총: {total_time:.2f}초")
-                        
-                        return {
-                            'rows_processed': rows_processed,
-                            'success': True,
-                            'error': None,
-                            'performance': {
-                                'query_time': query_time,
-                                'csv_write_time': csv_write_time,
-                                'commit_time': commit_time,
-                                'total_time': total_time
-                            }
-                        }
-                        
-            except Exception as e:
-                # 트랜잭션 롤백
-                try:
-                    if 'conn' in locals():
-                        conn.rollback()
-                        logger.debug("트랜잭션 롤백 완료")
-                except Exception as rollback_error:
-                    logger.warning(f"트랜잭션 롤백 실패: {rollback_error}")
-                
-                retry_count += 1
-                
-                if retry_count >= max_retries:
-                    logger.error(f"청크 처리 최대 재시도 횟수 초과: {e}")
-                    return {
-                        'rows_processed': 0,
-                        'success': False,
-                        'error': str(e),
-                        'retry_count': retry_count
-                    }
-                
-                # 지수 백오프 + 지터 추가
-                backoff_time = min(2 ** retry_count + (time.time() % 1), 60)  # 최대 60초
-                logger.warning(f"청크 처리 재시도 {retry_count}/{max_retries}: {e}, {backoff_time:.1f}초 후 재시도")
-                time.sleep(backoff_time)
 
     def _build_chunk_query(
         self, 
@@ -3147,10 +2912,6 @@ class DataCopyEngine:
 
     # CSV 관련 임시 테이블 메서드 제거됨
 
-
-
-
-
     def execute_merge_operation(
         self,
         source_table: str,
@@ -4175,7 +3936,6 @@ class DataCopyEngine:
         Returns:
             복사 결과 딕셔너리
         """
-
 
         # 사용자 정의 SQL이 제공된 경우 이를 사용
         if count_sql and select_sql:
@@ -5751,7 +5511,6 @@ class DataCopyEngine:
                 "sync_mode": sync_mode,
                 "execution_time": 0
             }
-
 
         """
         xmin 기반 증분 데이터 복사 (실제 xmin 값 저장)

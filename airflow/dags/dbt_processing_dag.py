@@ -112,7 +112,10 @@ def create_dbt_test_dag(**context):
     dbt_configs = configs["dbt_configs"]
 
     # Profile configuration for dbt
-    profile_mapping=PostgresUserPasswordProfileMapping(
+    profile_config = ProfileConfig(
+        profile_name="postgres_data_copy",
+        target_name="dev",
+        profile_mapping=PostgresUserPasswordProfileMapping(
             conn_id="airflow_db",
             profile_args={
                 "schema": "raw_data",
