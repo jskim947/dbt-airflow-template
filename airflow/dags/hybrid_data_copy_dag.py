@@ -59,6 +59,29 @@ SOURCE_CONN_ID = dag_config.get("source_connection", "digitalocean_postgres")
 # 하이브리드 테이블 설정 (DAGConfigManager에서 가져오기)
 HYBRID_TABLES_CONFIG = DAGConfigManager.get_table_configs("hybrid_data_copy_dag")
 
+# 설정이 비어있거나 잘못된 경우 기본값 사용
+if not HYBRID_TABLES_CONFIG or not isinstance(HYBRID_TABLES_CONFIG, list):
+    logger.warning("DAGConfigManager에서 테이블 설정을 가져올 수 없어 기본값을 사용합니다.")
+    HYBRID_TABLES_CONFIG = [
+        {
+            "source": "public.users",
+            "source_description": "사용자 테이블",
+            "primary_key": "id",
+            "chunk_mode": True,
+            "enable_checkpoint": True,
+            "max_retries": 3,
+            "targets": [
+                {
+                    "conn_id": "postgres_default",
+                    "table": "public.users",
+                    "sync_mode": "full_sync",
+                    "batch_size": 10000,
+                    "description": "로컬 PostgreSQL"
+                }
+            ]
+        }
+    ]
+
 # 데이터베이스 작업 객체 초기화
 db_operations = DatabaseOperations(SOURCE_CONN_ID, None)  # 소스만 필요
 

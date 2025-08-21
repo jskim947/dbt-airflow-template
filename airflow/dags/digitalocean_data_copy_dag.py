@@ -64,6 +64,23 @@ DBT_PROJECT_PATH = "/opt/airflow/dbt"
 # DigitalOcean PostgreSQL 테이블 설정 (DAGConfigManager에서 가져오기)
 DIGITALOCEAN_TABLES_CONFIG = DAGConfigManager.get_table_configs("digitalocean_data_copy_dag")
 
+# 설정이 비어있거나 잘못된 경우 기본값 사용
+if not DIGITALOCEAN_TABLES_CONFIG or not isinstance(DIGITALOCEAN_TABLES_CONFIG, list):
+    logger.warning("DAGConfigManager에서 테이블 설정을 가져올 수 없어 기본값을 사용합니다.")
+    DIGITALOCEAN_TABLES_CONFIG = [
+        {
+            "source": "public.users",
+            "target": "public.users",
+            "primary_key": "id",
+            "sync_mode": "full_sync",
+            "batch_size": 10000,
+            "chunk_mode": True,
+            "enable_checkpoint": True,
+            "max_retries": 3,
+            "description": "사용자 테이블"
+        }
+    ]
+
 # 데이터베이스 작업 객체 초기화
 db_operations = DatabaseOperations(SOURCE_CONN_ID, TARGET_CONN_ID)
 
