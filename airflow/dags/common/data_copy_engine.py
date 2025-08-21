@@ -1,15 +1,17 @@
 """
 Data Copy Engine Module
-데이터 복사 핵심 로직, CSV 내보내기/가져오기, 임시 테이블 관리, MERGE 작업 등을 담당
+데이터 복사 핵심 로직, 스트리밍 파이프라인, 스테이징 테이블 관리, MERGE 작업 등을 담당
+스트리밍 방식과 스테이징 테이블 방식만 지원 (CSV 및 임시 테이블 방식 제거됨)
 """
 
 import logging
 import os
 import time
-import csv
+
 import json
 import gc
 import psutil
+import subprocess
 from typing import Any
 from contextlib import contextmanager
 
@@ -95,50 +97,625 @@ class DataCopyEngine:
             }
             logger.warning("설정 모듈을 가져올 수 없어 기본 설정을 사용합니다")
 
-    def export_to_csv(
-        self,
-        table_name: str,
-        csv_path: str,
-        where_clause: str | None = None,
-        batch_size: int = 10000,
-        order_by_field: str | None = None,
-        chunk_mode: bool = True,  # 새로운 파라미터
-        enable_checkpoint: bool = True,  # 체크포인트 활성화
-        max_retries: int = 3  # 최대 재시도 횟수
-    ) -> int:
+    def create_staging_table(self, target_table: str, source_schema: dict[str, Any]) -> str:
         """
-        테이블을 CSV로 내보내기 (청크 방식 지원)
-
+        타겟 DB에 스테이징 테이블 생성
+        
         Args:
-            table_name: 테이블명
-            csv_path: CSV 파일 경로
-            where_clause: WHERE 절 조건
-            batch_size: 배치 크기
-            order_by_field: 정렬 기준 필드
-            chunk_mode: 청크 방식 사용 여부 (True: 메모리 누적 없음, False: 기존 방식)
-            enable_checkpoint: 체크포인트 활성화 여부
-            max_retries: 최대 재시도 횟수
-
+            target_table: 최종 타겟 테이블명 (예: raw_data.sym_v1_sym_coverage)
+            source_schema: 소스 테이블 스키마 정보
+        
         Returns:
-            내보낸 행 수
+            생성된 스테이징 테이블명
         """
         try:
-            # 청크 모드가 활성화된 경우 새로운 방식 사용
-            if chunk_mode:
-                logger.info(f"청크 방식으로 CSV 내보내기 시작: {table_name}")
-                return self._export_to_csv_chunked(
-                    table_name, csv_path, where_clause, batch_size, 
-                    order_by_field, enable_checkpoint, max_retries
-                )
+            # 고유한 스테이징 테이블명 생성
+            table_name = target_table.split('.')[-1]
+            staging_table_name = f"staging_{table_name}_{int(time.time())}"
+            
+            # 스키마와 테이블명 분리
+            if "." in target_table:
+                schema, _ = target_table.split(".", 1)
             else:
-                logger.info(f"기존 방식으로 CSV 내보내기 시작: {table_name}")
-                return self._export_to_csv_legacy(
-                    table_name, csv_path, where_clause, batch_size, order_by_field
-                )
-
+                schema = "public"
+            
+            full_staging_name = f"{schema}.{staging_table_name}"
+            
+            # 스테이징 테이블 생성 SQL 생성
+            create_sql = self._generate_staging_table_sql(full_staging_name, source_schema)
+            
+            # 타겟 DB에 스테이징 테이블 생성
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(create_sql)
+                    conn.commit()
+                    
+                    # 스테이징 테이블이 실제로 생성되었는지 확인
+                    cursor.execute(f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{staging_table_name}' AND table_schema = '{schema}')")
+                    exists = cursor.fetchone()[0]
+                    if not exists:
+                        raise Exception(f"스테이징 테이블 {full_staging_name}이 생성되지 않았습니다.")
+            
+            logger.info(f"스테이징 테이블 생성 완료: {full_staging_name}")
+            return full_staging_name
+            
         except Exception as e:
-            logger.error(f"CSV 내보내기 실패: {table_name} -> {csv_path}, 오류: {e!s}")
+            logger.error(f"스테이징 테이블 생성 실패: {target_table}, 오류: {e}")
             raise
+
+    def _generate_staging_table_sql(self, staging_table: str, source_schema: dict[str, Any]) -> str:
+        """
+        스테이징 테이블 생성 SQL 생성
+        
+        Args:
+            staging_table: 스테이징 테이블명
+            source_schema: 소스 테이블 스키마 정보
+        
+        Returns:
+            CREATE TABLE SQL 문
+        """
+        # 컬럼 정의 생성
+        column_definitions = []
+        for col in source_schema["columns"]:
+            col_name = col["name"]
+            col_type = col["type"]
+
+            # PostgreSQL 타입 매핑
+            col_type = self._convert_to_postgres_type(col_type, col.get('max_length'))
+
+            nullable = "" if col["nullable"] else " NOT NULL"
+            column_definitions.append(f"{col_name} {col_type}{nullable}")
+
+        # UNLOGGED 테이블로 생성 (성능 향상)
+        create_sql = f"""
+            CREATE UNLOGGED TABLE {staging_table} (
+                {', '.join(column_definitions)}
+            )
+        """
+        
+        return create_sql
+
+    def copy_data_to_staging(self, source_table: str, staging_table: str, where_condition: str = None) -> dict[str, Any]:
+        """
+        소스 테이블에서 스테이징 테이블로 데이터 복사
+        
+        Args:
+            source_table: 소스 테이블명
+            staging_table: 스테이징 테이블명
+            where_condition: WHERE 조건
+        
+        Returns:
+            복사 결과 정보
+        """
+        try:
+            # 1. 소스 데이터 카운트 조회
+            source_count = self._get_source_count(source_table, where_condition)
+            
+            # 2. 스테이징 테이블로 직접 복사 (psql COPY)
+            copy_result = self._copy_with_psql_copy(source_table, staging_table, where_condition)
+            
+            # 3. 복사된 데이터 검증
+            staging_count = self._get_staging_count(staging_table)
+            
+            return {
+                'status': 'success',
+                'source_count': source_count,
+                'staging_count': staging_count,
+                'copy_time': copy_result['execution_time']
+            }
+            
+        except Exception as e:
+            logger.error(f"스테이징 테이블로 데이터 복사 실패: {str(e)}")
+            raise
+
+    def _copy_with_psql_copy(self, source_table: str, staging_table: str, where_condition: str = None) -> dict[str, Any]:
+        """
+        psql COPY 명령어를 사용한 데이터 복사
+        """
+        start_time = time.time()
+        export_process = None
+        import_process = None
+        
+        try:
+            # psql 명령어 사용 가능 여부 확인
+            try:
+                subprocess.run(['psql', '--version'], capture_output=True, check=True)
+                logger.info("psql 명령어 사용 가능 확인됨")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                logger.warning("psql 명령어를 찾을 수 없습니다. Python 기반 복사로 전환합니다.")
+                return self._copy_with_python_fallback(source_table, staging_table, where_condition)
+            
+            # 소스 DB 연결 정보 가져오기
+            source_conn = self.source_hook.get_conn()
+            source_host = source_conn.info.host
+            source_port = source_conn.info.port
+            source_user = source_conn.info.user
+            source_database = source_conn.info.dbname
+            source_password = source_conn.info.password
+            
+            # 타겟 DB 연결 정보 가져오기
+            target_conn = self.target_hook.get_conn()
+            target_host = target_conn.info.host
+            target_port = target_conn.info.port
+            target_user = target_conn.info.user
+            target_database = target_conn.info.dbname
+            target_password = target_conn.info.password
+            
+            # WHERE 조건이 있는 경우 서브쿼리로 처리
+            if where_condition:
+                source_query = f"SELECT * FROM {source_table} WHERE {where_condition}"
+            else:
+                source_query = f"SELECT * FROM {source_table}"
+            
+            # 환경변수로 비밀번호 설정 (보안 강화)
+            env = os.environ.copy()
+            env['PGPASSWORD'] = source_password
+            
+            # COPY 명령어 실행 (소스에서 CSV로 내보내기)
+            export_command = [
+                'psql', '-h', source_host, '-p', str(source_port), '-U', source_user, '-d', source_database,
+                '-c', f"\\copy ({source_query}) TO STDOUT CSV HEADER"
+            ]
+            
+            # 환경변수로 비밀번호 설정 (보안 강화)
+            env_target = os.environ.copy()
+            env_target['PGPASSWORD'] = target_password
+            
+            # CSV를 타겟으로 가져오기
+            import_command = [
+                'psql', '-h', target_host, '-p', str(target_port), '-U', target_user, '-d', target_database,
+                '-c', f"\\copy {staging_table} FROM STDIN CSV HEADER"
+            ]
+            
+            # 디버깅을 위한 상세 로깅
+            logger.info(f"psql COPY 명령어 실행 시작:")
+            logger.info(f"  소스 DB: {source_host}:{source_database} (사용자: {source_user})")
+            logger.info(f"  타겟 DB: {target_host}:{target_database} (사용자: {target_user})")
+            logger.info(f"  소스 쿼리: {source_query}")
+            logger.info(f"  스테이징 테이블: {staging_table}")
+            logger.info(f"  export 명령어: {' '.join(export_command)}")
+            logger.info(f"  import 명령어: {' '.join(import_command)}")
+            
+            # 명령어 실행 전 환경 확인
+            logger.info(f"  현재 작업 디렉토리: {os.getcwd()}")
+            logger.info(f"  PATH 환경변수: {os.environ.get('PATH', 'Not set')}")
+            
+            # 순차적 실행으로 변경 (파이프라인 대신)
+            logger.info("순차적 실행 방식으로 변경...")
+            
+            # 1단계: export_process 실행
+            logger.info("1단계: 소스 데이터 내보내기 시작...")
+            export_process = subprocess.Popen(
+                export_command, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                env=env
+            )
+            logger.info(f"export_process 시작됨 (PID: {export_process.pid})")
+            
+            # export_process 완료 대기
+            try:
+                export_stdout, export_stderr = export_process.communicate(timeout=300)  # 5분 타임아웃
+                logger.info("export_process 완료")
+                
+                if export_process.returncode != 0:
+                    export_stderr_text = export_stderr.decode() if export_stderr else "Unknown error"
+                    logger.error(f"export_process 실패 - 종료코드: {export_process.returncode}")
+                    logger.error(f"export_process stderr: {export_stderr_text}")
+                    raise Exception(f"소스 데이터 내보내기 실패 (코드: {export_process.returncode}): {export_stderr_text}")
+                
+            except subprocess.TimeoutExpired:
+                logger.error("export_process 타임아웃 (5분)")
+                export_process.kill()
+                raise Exception("소스 데이터 내보내기 타임아웃")
+            
+            # 2단계: import_process 실행
+            logger.info("2단계: 스테이징 테이블로 데이터 가져오기 시작...")
+            import_process = subprocess.Popen(
+                import_command,
+                stdin=subprocess.PIPE,  # export_process의 출력을 직접 전달
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env_target
+            )
+            logger.info(f"import_process 시작됨 (PID: {import_process.pid})")
+            
+            # export_process의 출력을 import_process에 전달
+            try:
+                stdout, stderr = import_process.communicate(
+                    input=export_stdout,  # export_process의 출력을 직접 전달
+                    timeout=300  # 5분 타임아웃
+                )
+                logger.info("import_process 완료")
+                
+            except subprocess.TimeoutExpired:
+                logger.error("import_process 타임아웃 (5분)")
+                import_process.kill()
+                raise Exception("스테이징 테이블로 데이터 가져오기 타임아웃")
+            
+            # 프로세스 종료 코드 확인 (에러 메시지 수집)
+            if import_process.returncode is None:
+                logger.error("import_process가 정상적으로 종료되지 않음")
+                logger.error(f"import_process 상태: {import_process.poll()}")
+                import_stderr = stderr.decode() if stderr else "Unknown error"
+                raise Exception(f"스테이징 테이블로 데이터 가져오기 실패: 프로세스가 정상적으로 종료되지 않음 (stderr: {import_stderr})")
+            
+            if import_process.returncode != 0:
+                import_stderr = stderr.decode() if stderr else "Unknown error"
+                logger.error(f"import_process 실패 - 종료코드: {import_process.returncode}")
+                logger.error(f"import_process stderr: {import_stderr}")
+                raise Exception(f"스테이징 테이블로 데이터 가져오기 실패 (코드: {import_process.returncode}): {import_stderr}")
+            
+            execution_time = time.time() - start_time
+            logger.info(f"psql COPY 명령어 실행 성공 - 소요시간: {execution_time:.2f}초")
+            
+            return {
+                'status': 'success',
+                'execution_time': execution_time,
+                'stdout': stdout.decode() if stdout else "",
+                'stderr': stderr.decode() if stderr else ""
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"psql COPY 명령어 실행 실패: {str(e)}")
+            raise
+            
+        finally:
+            # 프로세스 정리 보장
+            if export_process:
+                try:
+                    export_process.terminate()
+                    export_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    export_process.kill()
+                except Exception as cleanup_error:
+                    logger.warning(f"export_process 정리 중 오류: {cleanup_error}")
+            
+            if import_process:
+                try:
+                    import_process.terminate()
+                    import_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    import_process.kill()
+                except Exception as cleanup_error:
+                    logger.warning(f"import_process 정리 중 오류: {cleanup_error}")
+
+    def _copy_with_python_fallback(self, source_table: str, staging_table: str, where_condition: str = None) -> dict[str, Any]:
+        """
+        psql 명령어를 사용할 수 없을 때 Python 기반으로 데이터 복사
+        """
+        start_time = time.time()
+        
+        try:
+            logger.info(f"Python 기반 데이터 복사 시작: {source_table} -> {staging_table}")
+            
+            # WHERE 조건이 있는 경우 서브쿼리로 처리
+            if where_condition:
+                source_query = f"SELECT * FROM {source_table} WHERE {where_condition}"
+            else:
+                source_query = f"SELECT * FROM {source_table}"
+            
+            # 소스에서 데이터 조회
+            with self.source_hook.get_conn() as source_conn:
+                with source_conn.cursor() as source_cursor:
+                    source_cursor.execute(source_query)
+                    columns = [desc[0] for desc in source_cursor.description]
+                    
+                    # 배치 단위로 데이터 처리
+                    batch_size = 10000
+                    total_rows = 0
+                    
+                    while True:
+                        rows = source_cursor.fetchmany(batch_size)
+                        if not rows:
+                            break
+                        
+                        # 타겟에 데이터 삽입
+                        with self.target_hook.get_conn() as target_conn:
+                            with target_conn.cursor() as target_cursor:
+                                # 첫 번째 배치에서 테이블 생성 (이미 생성되어 있음)
+                                if total_rows == 0:
+                                    # 컬럼명을 따옴표로 감싸서 안전하게 처리
+                                    quoted_columns = [f'"{col}"' for col in columns]
+                                    placeholders = ','.join(['%s'] * len(columns))
+                                    
+                                    # 기존 데이터 삭제
+                                    target_cursor.execute(f"DELETE FROM {staging_table}")
+                                
+                                # 데이터 삽입
+                                insert_sql = f"INSERT INTO {staging_table} ({','.join(quoted_columns)}) VALUES ({placeholders})"
+                                target_cursor.executemany(insert_sql, rows)
+                                target_conn.commit()
+                                
+                                total_rows += len(rows)
+                                logger.info(f"배치 처리 완료: {total_rows}행")
+            
+            execution_time = time.time() - start_time
+            logger.info(f"Python 기반 데이터 복사 완료 - 총 {total_rows}행, 소요시간: {execution_time:.2f}초")
+            
+            return {
+                'status': 'success',
+                'execution_time': execution_time,
+                'rows_copied': total_rows,
+                'method': 'python_fallback'
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"Python 기반 데이터 복사 실패: {str(e)}")
+            raise
+
+    def _get_source_count(self, source_table: str, where_condition: str = None) -> int:
+        """
+        소스 테이블의 데이터 개수 조회
+        """
+        try:
+            # 입력값 유효성 검증
+            if not source_table:
+                raise ValueError("source_table이 비어있습니다")
+            
+            # 테이블명 유효성 검증
+            if not self._is_valid_table_name(source_table):
+                raise ValueError(f"유효하지 않은 테이블명: {source_table}")
+            
+            # WHERE 조건이 있는 경우 안전한 쿼리 구성
+            if where_condition:
+                # WHERE 조건의 기본적인 유효성 검증 (복잡한 조건은 별도 검증 필요)
+                if not isinstance(where_condition, str) or len(where_condition.strip()) == 0:
+                    raise ValueError("유효하지 않은 WHERE 조건")
+                
+                count_sql = f"SELECT COUNT(*) FROM {source_table} WHERE {where_condition}"
+            else:
+                count_sql = f"SELECT COUNT(*) FROM {source_table}"
+            
+            with self.source_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(count_sql)
+                    count = cursor.fetchone()[0]
+                    return count
+                    
+        except Exception as e:
+            logger.error(f"소스 테이블 데이터 개수 조회 실패: {str(e)}")
+            raise
+
+    def _get_staging_count(self, staging_table: str) -> int:
+        """
+        스테이징 테이블의 데이터 개수 조회
+        """
+        try:
+            # 입력값 유효성 검증
+            if not staging_table:
+                raise ValueError("staging_table이 비어있습니다")
+            
+            # 테이블명 유효성 검증
+            if not self._is_valid_table_name(staging_table):
+                raise ValueError(f"유효하지 않은 테이블명: {staging_table}")
+            
+            count_sql = f"SELECT COUNT(*) FROM {staging_table}"
+            
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(count_sql)
+                    count = cursor.fetchone()[0]
+                    return count
+                    
+        except Exception as e:
+            logger.error(f"스테이징 테이블 데이터 개수 조회 실패: {str(e)}")
+            raise
+
+    def merge_from_staging(self, target_table: str, staging_table: str, primary_keys: list[str]) -> dict[str, Any]:
+        """
+        스테이징 테이블에서 최종 테이블로 데이터 MERGE
+        
+        Args:
+            target_table: 최종 타겟 테이블명
+            staging_table: 스테이징 테이블명
+            primary_keys: 기본키 리스트
+        
+        Returns:
+            MERGE 결과 정보
+        """
+        try:
+            # 1. MERGE 전 데이터 검증
+            staging_count = self._get_staging_count(staging_table)
+            target_before_count = self._get_target_count(target_table)
+            
+            # 2. MERGE 작업 실행
+            merge_result = self._execute_merge(target_table, staging_table, primary_keys)
+            
+            # 3. MERGE 후 데이터 검증
+            target_after_count = self._get_target_count(target_table)
+            
+            return {
+                'status': 'success',
+                'staging_count': staging_count,
+                'target_before_count': target_before_count,
+                'target_after_count': target_after_count,
+                'merged_rows': target_after_count - target_before_count,
+                'merge_time': merge_result['execution_time']
+            }
+            
+        except Exception as e:
+            logger.error(f"MERGE 작업 실패: {str(e)}")
+            raise
+
+    def _execute_merge(self, target_table: str, staging_table: str, primary_keys: list[str]) -> dict[str, Any]:
+        """
+        MERGE SQL 실행
+        """
+        start_time = time.time()
+        
+        try:
+            # 입력값 유효성 검증
+            if not target_table or not staging_table:
+                raise ValueError("target_table 또는 staging_table이 비어있습니다")
+            
+            if not primary_keys or not isinstance(primary_keys, list):
+                raise ValueError("primary_keys가 비어있거나 리스트가 아닙니다")
+            
+            # 테이블명 유효성 검증
+            if not self._is_valid_table_name(target_table):
+                raise ValueError(f"유효하지 않은 target_table: {target_table}")
+            
+            if not self._is_valid_table_name(staging_table):
+                raise ValueError(f"유효하지 않은 staging_table: {staging_table}")
+            
+            # 기본키 유효성 검증
+            for pk in primary_keys:
+                if not self._is_valid_field_name(pk):
+                    raise ValueError(f"유효하지 않은 기본키: {pk}")
+            
+            # 기본키 기반 MERGE SQL 생성
+            pk_conditions = ' AND '.join([f"t.{pk} = s.{pk}" for pk in primary_keys])
+            
+            merge_sql = f"""
+            BEGIN;
+            
+            -- 기존 데이터 삭제 (기본키 기준)
+            DELETE FROM {target_table} t
+            WHERE EXISTS (
+                SELECT 1 FROM {staging_table} s
+                WHERE {pk_conditions}
+            );
+            
+            -- 새 데이터 삽입
+            INSERT INTO {target_table}
+            SELECT * FROM {staging_table};
+            
+            COMMIT;
+            """
+            
+            # MERGE SQL 실행
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(merge_sql)
+                    conn.commit()
+            
+            execution_time = time.time() - start_time
+            
+            return {
+                'status': 'success',
+                'execution_time': execution_time
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"MERGE SQL 실행 실패: {str(e)}")
+            raise
+
+    def _get_target_count(self, target_table: str) -> int:
+        """
+        타겟 테이블의 데이터 개수 조회
+        """
+        try:
+            # 입력값 유효성 검증
+            if not target_table:
+                raise ValueError("target_table이 비어있습니다")
+            
+            # 테이블명 유효성 검증
+            if not self._is_valid_table_name(target_table):
+                raise ValueError(f"유효하지 않은 테이블명: {target_table}")
+            
+            count_sql = f"SELECT COUNT(*) FROM {target_table}"
+            
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(count_sql)
+                    count = cursor.fetchone()[0]
+                    return count
+                    
+        except Exception as e:
+            logger.error(f"타겟 테이블 데이터 개수 조회 실패: {str(e)}")
+            raise
+
+    def cleanup_staging_table(self, staging_table: str) -> bool:
+        """
+        스테이징 테이블 정리
+        
+        Args:
+            staging_table: 정리할 스테이징 테이블명
+        
+        Returns:
+            정리 성공 여부
+        """
+        try:
+            cleanup_sql = f"DROP TABLE IF EXISTS {staging_table}"
+            
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(cleanup_sql)
+                    conn.commit()
+            
+            logger.info(f"스테이징 테이블 정리 완료: {staging_table}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"스테이징 테이블 정리 실패: {str(e)}")
+            raise
+
+    def copy_with_staging_table(
+        self, 
+        source_table: str, 
+        target_table: str, 
+        primary_keys: list[str],
+        where_condition: str = None
+    ) -> dict[str, Any]:
+        """
+        스테이징 테이블을 사용한 전체 데이터 복사 프로세스
+        
+        Args:
+            source_table: 소스 테이블명
+            target_table: 타겟 테이블명
+            primary_keys: 기본키 리스트
+            where_condition: WHERE 조건
+        
+        Returns:
+            복사 결과 정보
+        """
+        staging_table = None
+        
+        try:
+            logger.info(f"스테이징 테이블 방식 데이터 복사 시작: {source_table} -> {target_table}")
+            
+            # 1. 소스 테이블 스키마 조회
+            source_schema = self.db_ops.get_table_schema(source_table)
+            if not source_schema:
+                raise Exception(f"소스 테이블 {source_table}의 스키마 정보를 가져올 수 없습니다")
+            
+            # 2. 스테이징 테이블 생성
+            staging_table = self.create_staging_table(target_table, source_schema)
+            
+            # 3. 데이터 복사 (소스 → 스테이징)
+            copy_result = self.copy_data_to_staging(source_table, staging_table, where_condition)
+            
+            # 4. MERGE 작업 (스테이징 → 최종)
+            merge_result = self.merge_from_staging(target_table, staging_table, primary_keys)
+            
+            # 5. 결과 반환
+            result = {
+                'status': 'success',
+                'source_table': source_table,
+                'target_table': target_table,
+                'staging_table': staging_table,
+                'copy_result': copy_result,
+                'merge_result': merge_result,
+                'total_execution_time': copy_result['copy_time'] + merge_result['merge_time']
+            }
+            
+            logger.info(f"스테이징 테이블 방식 데이터 복사 완료: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"스테이징 테이블 방식 데이터 복사 실패: {str(e)}")
+            raise
+            
+        finally:
+            # 6. 스테이징 테이블 정리 (항상 실행 보장)
+            if staging_table:
+                self.cleanup_staging_table(staging_table)
+
+
 
     def _optimize_target_session(self, hook) -> None:
         """
@@ -272,7 +849,7 @@ class DataCopyEngine:
         max_retries: int = 3
     ) -> dict[str, Any]:
         """
-        스트리밍 파이프를 사용한 데이터 복사 (중간 CSV 파일 없음)
+        스트리밍 파이프를 사용한 데이터 복사 (스테이징 테이블 방식)
         
         Args:
             source_table: 소스 테이블명
@@ -297,39 +874,40 @@ class DataCopyEngine:
             # 1단계: 소스 테이블 스키마 조회
             source_schema = self.db_ops.get_table_schema(source_table)
             
-            # 2단계: 사용자 정의 SQL 생성
-            count_sql, select_sql = self._build_custom_sql_queries(
-                source_table, source_schema, incremental_field,
-                incremental_field_type, custom_where
-            )
+            # 2단계: WHERE 조건 구성
+            where_condition = None
+            if custom_where:
+                where_condition = custom_where
+            elif incremental_field and incremental_field_type:
+                # 증분 동기화 조건 구성
+                where_condition = self._build_incremental_where_condition(
+                    incremental_field, incremental_field_type, target_table
+                )
             
-            # 3단계: 데이터 개수 확인
-            row_count = self._get_source_row_count(count_sql)
+            # 3단계: 스테이징 테이블 방식으로 데이터 복사 실행
+            logger.info(f"스테이징 테이블 방식으로 데이터 복사 시작: {source_table} -> {target_table}")
             
-            if row_count == 0:
-                logger.info(f"소스 테이블 {source_table}에 조건에 맞는 데이터가 없습니다.")
-                return {
-                    "status": "success",
-                    "exported_rows": 0,
-                    "imported_rows": 0,
-                    "total_execution_time": time.time() - start_time,
-                    "message": "조건에 맞는 데이터가 없음"
-                }
-            
-            # 4단계: 스트리밍 파이프로 직접 복사
-            imported_rows = self._stream_data_directly(
-                select_sql, target_table, primary_keys, sync_mode, 
-                verified_target_schema, source_schema
+            staging_result = self.copy_with_staging_table(
+                source_table=source_table,
+                target_table=target_table,
+                primary_keys=primary_keys,
+                where_condition=where_condition
             )
             
             total_time = time.time() - start_time
             
+            # 스테이징 결과에서 필요한 정보 추출
+            copy_result = staging_result.get('copy_result', {})
+            exported_rows = copy_result.get('staging_count', 0)
+            imported_rows = copy_result.get('target_count', 0)
+            
             result = {
                 "status": "success",
-                "exported_rows": row_count,
+                "exported_rows": exported_rows,
                 "imported_rows": imported_rows,
                 "total_execution_time": total_time,
-                "message": f"스트리밍 파이프로 데이터 복사 완료: {imported_rows}행"
+                "message": f"스테이징 테이블 방식으로 데이터 복사 완료: {imported_rows}행",
+                "staging_result": staging_result
             }
             
             logger.info(f"스트리밍 파이프를 사용한 데이터 복사 완료: {result}")
@@ -374,11 +952,11 @@ class DataCopyEngine:
             복사된 행 수
         """
         try:
-            # 1단계: 임시 테이블 생성 (UNLOGGED)
-            temp_table = self.create_temp_table(target_table, verified_target_schema or source_schema)
+            # 1단계: 스테이징 테이블 생성 (UNLOGGED)
+            staging_table = self.create_staging_table(target_table, verified_target_schema or source_schema)
             
             # 2단계: psql 파이프라인을 사용한 스트리밍 복사
-            imported_rows = self._copy_with_psql_pipe(select_sql, temp_table, source_schema)
+            imported_rows = self._copy_with_psql_pipe(select_sql, staging_table, source_schema)
             
             if imported_rows == 0:
                 logger.warning("스트리밍 복사 실패")
@@ -386,19 +964,13 @@ class DataCopyEngine:
             
             # 3단계: MERGE 작업 수행
             merge_result = self.execute_merge_operation(
-                temp_table, target_table, primary_keys, sync_mode
+                staging_table, target_table, primary_keys, sync_mode
             )
             
             if merge_result["status"] != "success":
                 logger.error(f"MERGE 작업 실패: {merge_result['message']}")
                 # 실패 시 스테이징 테이블 정리 시도
-                try:
-                    with self.target_hook.get_conn() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute(f"DROP TABLE IF EXISTS {temp_table}")
-                            conn.commit()
-                except Exception:
-                    pass
+                self.cleanup_staging_table(staging_table)
                 return 0
             
             # 4단계: 성능 최적화
@@ -663,11 +1235,11 @@ class DataCopyEngine:
             복사된 행 수
         """
         try:
-            # 1단계: 임시 테이블 생성 (UNLOGGED)
-            temp_table = self.create_temp_table(target_table, verified_target_schema or source_schema)
+            # 1단계: 스테이징 테이블 생성 (UNLOGGED)
+            staging_table = self.create_staging_table(target_table, verified_target_schema or source_schema)
             
             # 2단계: psql 바이너리 파이프라인을 사용한 스트리밍 복사
-            imported_rows = self._copy_with_psql_binary_pipe(select_sql, temp_table, source_schema)
+            imported_rows = self._copy_with_psql_binary_pipe(select_sql, staging_table, source_schema)
             
             if imported_rows == 0:
                 logger.warning("바이너리 복사 실패")
@@ -675,7 +1247,7 @@ class DataCopyEngine:
             
             # 3단계: MERGE 작업 수행
             merge_result = self.execute_merge_operation(
-                temp_table, target_table, primary_keys, sync_mode
+                staging_table, target_table, primary_keys, sync_mode
             )
             
             if merge_result["status"] != "success":
@@ -2002,118 +2574,6 @@ class DataCopyEngine:
             logger.error(f"청크 CSV 병합 실패: {e}")
             raise
 
-    def get_source_max_xmin(self, source_table: str) -> int:
-        """
-        소스 테이블의 최대 xmin 값 조회
-        
-        Args:
-            source_table: 소스 테이블명
-            
-        Returns:
-            최대 xmin 값 (실패 시 0)
-        """
-        try:
-            logger.info(f"소스 테이블 {source_table}의 최대 xmin 값 조회 시작")
-            
-            # PostgreSQL 시스템 필드 xmin의 최대값 조회
-            max_xmin_sql = f"SELECT MAX(xmin::text::bigint) FROM {source_table}"
-            result = self.source_hook.get_first(max_xmin_sql)
-            
-            if result and result[0]:
-                max_xmin = result[0]
-                logger.info(f"소스 테이블 {source_table}의 최대 xmin: {max_xmin}")
-                return max_xmin
-            else:
-                logger.warning(f"소스 테이블 {source_table}에서 xmin 값을 찾을 수 없음")
-                return 0
-                
-        except Exception as e:
-            logger.error(f"소스 테이블 xmin 조회 실패: {e}")
-            return 0
-
-    def export_to_csv_with_xmin(self, source_table: str, csv_file: str, batch_size: int = None) -> int:
-        """
-        xmin 값을 포함하여 CSV 내보내기 (워커 설정 적용)
-        
-        Args:
-            source_table: 소스 테이블명
-            csv_file: CSV 파일 경로
-            batch_size: 배치 크기 (None이면 워커 설정 기반으로 결정)
-            
-        Returns:
-            내보낸 행 수
-        """
-        try:
-            # 1. 소스 테이블의 최대 xmin 값 조회
-            max_xmin = self.get_source_max_xmin(source_table)
-            logger.info(f"소스 테이블 {source_table}의 최대 xmin: {max_xmin}")
-            
-            # 2. 배치 크기 결정 (워커 설정 기반)
-            if batch_size is None:
-                # 워커 수에 따라 배치 크기 조정
-                default_workers = self.worker_config.get("default_workers", 4)
-                if default_workers <= 2:
-                    batch_size = 5000
-                elif default_workers <= 4:
-                    batch_size = 10000
-                else:
-                    batch_size = 15000
-                logger.info(f"워커 수({default_workers}) 기반 배치 크기 자동 설정: {batch_size}")
-            
-            # 3. 전체 행 수 조회
-            count_sql = f"SELECT COUNT(*) FROM {source_table}"
-            total_rows = self.source_hook.get_first(count_sql)[0]
-            
-            if total_rows == 0:
-                logger.warning(f"테이블 {source_table}에 데이터가 없습니다.")
-                return 0
-            
-            # 4. 워커 수 설정
-            num_workers = self.worker_config.get("default_workers", 4)
-            
-            logger.info(f"CSV 내보내기 시작: {source_table} -> {csv_file}")
-            logger.info(f"총 행 수: {total_rows}, 배치 크기: {batch_size}, 워커 수: {num_workers}")
-            
-            # 5. 배치별로 데이터 처리하여 CSV 파일에 쓰기
-            exported_rows = 0
-            with open(csv_file, 'w', encoding='utf-8') as f:
-                # 헤더 작성 (xmin 컬럼 포함)
-                header_written = False
-                
-                for offset in range(0, total_rows, batch_size):
-                    query = f"""
-                        SELECT 
-                            *,
-                            {max_xmin} as source_xmin
-                        FROM {source_table}
-                        ORDER BY 1
-                        LIMIT {batch_size} OFFSET {offset}
-                    """
-                    
-                    batch_data = self.source_hook.get_records(query)
-                    
-                    if not header_written and batch_data:
-                        # 첫 번째 배치에서 헤더 작성
-                        columns = list(batch_data[0].keys())
-                        f.write(','.join(columns) + '\n')
-                        header_written = True
-                    
-                    # CSV 형식으로 쓰기
-                    for row in batch_data:
-                        f.write(','.join(str(cell) if cell is not None else '' for cell in row) + '\n')
-                        exported_rows += 1
-                    
-                    # 진행률 로깅
-                    current_progress = min(offset + batch_size, total_rows)
-                    logger.info(f"배치 처리 진행률: {current_progress}/{total_rows} ({exported_rows}행 처리됨)")
-            
-            logger.info(f"xmin 값({max_xmin})을 포함한 CSV 내보내기 완료: {csv_file}, 총 {exported_rows}행")
-            return exported_rows
-            
-        except Exception as e:
-            logger.error(f"xmin 값을 포함한 CSV 내보내기 실패: {e}")
-            raise
-
     def _validate_and_convert_data_types(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
         """
         데이터프레임의 모든 컬럼에 대해 데이터 타입 검증 및 변환 수행
@@ -2685,407 +3145,11 @@ class DataCopyEngine:
             logger.info("기본 데이터 타입 변환을 수행합니다.")
             return self._basic_data_type_conversion(df)
 
-    def create_temp_table_and_import_csv(
-        self, target_table: str, source_schema: dict[str, Any], csv_path: str, batch_size: int = 1000
-    ) -> tuple[str, int]:
-        """
-        임시 테이블 생성과 CSV 가져오기를 하나의 연결에서 실행
+    # CSV 관련 임시 테이블 메서드 제거됨
 
-        Args:
-            target_table: 타겟 테이블명
-            source_schema: 소스 테이블 스키마 정보
-            csv_path: CSV 파일 경로
-            batch_size: 배치 크기
 
-        Returns:
-            (임시 테이블명, 가져온 행 수) 튜플
-        """
-        try:
-            # 임시 테이블명 생성
-            temp_table = (
-                f"temp_{target_table.replace('.', '_')}_"
-                f"{int(pd.Timestamp.now().timestamp())}"
-            )
 
-            # 스키마와 테이블명 분리
-            if "." in target_table:
-                schema, table = target_table.split(".", 1)
-            else:
-                schema = "public"
-                table = target_table
 
-            # 컬럼 정의 생성
-            column_definitions = []
-            for col in source_schema["columns"]:
-                col_name = col["name"]
-                col_type = col["type"]  # data_type -> type으로 변경
-                is_nullable = col["nullable"]  # nullable 정보 복원
-
-                # PostgreSQL 데이터 타입 매핑
-                if col_type.upper() in ["VARCHAR", "CHAR", "TEXT"]:
-                    pg_type = "TEXT"
-                elif (
-                    col_type.upper() in ["INTEGER", "INT", "BIGINT", "SMALLINT"]
-                    or col_type.upper()
-                    in ["DECIMAL", "NUMERIC", "REAL", "DOUBLE PRECISION"]
-                    or col_type.upper() in ["DATE", "TIMESTAMP", "TIME"]
-                ):
-                    pg_type = "TEXT"  # 안전성을 위해 TEXT로 변환
-                else:
-                    pg_type = "TEXT"  # 기본값
-
-                # 원본 스키마의 nullable 정보를 유지
-                nullable_clause = "NOT NULL" if not is_nullable else ""
-                column_definitions.append(
-                    f"{col_name} {pg_type} {nullable_clause}".strip()
-                )
-
-            # CREATE TABLE 문 생성 (임시 테이블 대신 영구 테이블 사용)
-            create_sql = f"""
-                CREATE TABLE {temp_table} (
-                    {', '.join(column_definitions)}
-                )
-            """
-
-            logger.info(f"임시 테이블 생성 SQL: {create_sql}")
-
-            # 타겟 데이터베이스 연결
-            target_hook = self.target_hook
-
-            # 하나의 연결에서 임시 테이블 생성과 CSV 가져오기 실행
-            with target_hook.get_conn() as conn:
-                with conn.cursor() as cursor:
-                    # 1. 임시 테이블 생성
-                    cursor.execute(create_sql)
-                    logger.info(f"임시 테이블 생성 완료: {temp_table}")
-
-                    # 2. CSV 파일 읽기 (NA 문자열을 NaN으로 잘못 인식하지 않도록 설정)
-                    df = pd.read_csv(
-                        csv_path, encoding="utf-8", na_values=[], keep_default_na=False
-                    )
-
-                    if df.empty:
-                        logger.warning(f"CSV 파일 {csv_path}에 데이터가 없습니다.")
-                        return temp_table, 0
-
-                    # 3. 소스 스키마에서 컬럼명 가져오기
-                    if source_schema and source_schema.get("columns"):
-                        temp_columns = [col["name"] for col in source_schema["columns"]]
-                        logger.info(
-                            f"소스 스키마에서 컬럼명을 가져왔습니다: {temp_columns}"
-                        )
-
-                        # CSV 컬럼을 소스 스키마 순서에 맞춰 재정렬
-                        df_reordered = df[temp_columns]
-                        logger.info(
-                            f"CSV 컬럼을 소스 스키마 순서에 맞춰 재정렬했습니다: {temp_columns}"
-                        )
-                    else:
-                        temp_columns = list(df.columns)
-                        logger.info(
-                            f"소스 스키마 정보가 없어 CSV 컬럼명을 그대로 사용합니다: {temp_columns}"
-                        )
-                        df_reordered = df
-
-                    # 4. 데이터 타입 변환 및 null 값 검증
-                    # NOT NULL 제약조건이 있는 컬럼들 확인
-                    not_null_columns = []
-                    for col in source_schema["columns"]:
-                        if not col["nullable"]:
-                            not_null_columns.append(col["name"])
-
-                    logger.info(f"NOT NULL 제약조건이 있는 컬럼: {not_null_columns}")
-
-                    # null 값이 있는 행 검증 (실제 null 값만, "NA" 문자열은 제외)
-                    null_violations = []
-                    for col_name in not_null_columns:
-                        if col_name in df_reordered.columns:
-                            # 실제 null 값만 검사 (None, numpy.nan 등)
-                            null_rows = df_reordered[df_reordered[col_name].isna()]
-                            if not null_rows.empty:
-                                null_violations.append(
-                                    {
-                                        "column": col_name,
-                                        "count": len(null_rows),
-                                        "sample_rows": null_rows.head(3).to_dict(
-                                            "records"
-                                        ),
-                                    }
-                                )
-
-                    if null_violations:
-                        logger.warning(
-                            f"NOT NULL 제약조건 위반 발견: {null_violations}"
-                        )
-                        # null 값을 빈 문자열로 변환하여 임시로 처리
-                        for col_name in not_null_columns:
-                            if col_name in df_reordered.columns:
-                                df_reordered[col_name] = df_reordered[col_name].fillna(
-                                    ""
-                                )
-                                logger.info(
-                                    f"컬럼 {col_name}의 null 값을 빈 문자열로 변환했습니다."
-                                )
-
-                    # 일반적인 데이터 타입 변환
-                    for col in df_reordered.columns:
-                        # 실제 null 값만 빈 문자열로 변환 ("NA" 문자열은 보존)
-                        df_reordered[col] = df_reordered[col].fillna("")
-
-                        # 숫자 컬럼의 경우 문자열로 변환하여 안전하게 처리
-                        if df_reordered[col].dtype in ["int64", "float64"]:
-                            df_reordered[col] = df_reordered[col].astype(str)
-
-                    logger.info(f"데이터 타입 변환 완료: {len(df_reordered)}행")
-
-                    # 데이터 샘플 로깅 (디버깅용)
-                    logger.info("처리된 데이터 샘플 (처음 3행):")
-                    for i, row in df_reordered.head(3).iterrows():
-                        logger.info(f"행 {i}: {dict(row)}")
-
-                    # 5. INSERT 실행
-                    total_inserted = 0
-
-                    for i in range(0, len(df_reordered), batch_size):
-                        batch_df = df_reordered.iloc[i : i + batch_size]
-                        batch_data = [tuple(row) for row in batch_df.values]
-
-                        insert_query = f"""
-                            INSERT INTO {temp_table} ({', '.join(temp_columns)})
-                            VALUES ({', '.join(['%s'] * len(temp_columns))})
-                        """
-
-                        cursor.executemany(insert_query, batch_data)
-                        total_inserted += len(batch_data)
-
-                        if i % 10000 == 0:
-                            logger.info(
-                                f"INSERT 진행률: {total_inserted}/{len(df_reordered)}"
-                            )
-
-                    # 커밋
-                    conn.commit()
-
-                    logger.info(
-                        f"CSV 가져오기 완료: {csv_path} -> {temp_table}, 행 수: {total_inserted}"
-                    )
-                    return temp_table, total_inserted
-
-        except Exception as e:
-            logger.error(f"임시 테이블 생성 및 CSV 가져오기 실패: {e}")
-            raise Exception(f"임시 테이블 생성 및 CSV 가져오기 실패: {e}")
-
-    def create_temp_table(
-        self, target_table: str, source_schema: dict[str, Any]
-    ) -> str:
-        """
-        임시 테이블 생성
-
-        Args:
-            target_table: 타겟 테이블명
-            source_schema: 소스 테이블 스키마 정보
-
-        Returns:
-            생성된 임시 테이블명
-        """
-        try:
-            # 임시 테이블명 생성
-            temp_table = (
-                f"temp_{target_table.replace('.', '_')}_"
-                f"{int(pd.Timestamp.now().timestamp())}"
-            )
-
-            # 스키마와 테이블명 분리
-            if "." in target_table:
-                schema, table = target_table.split(".", 1)
-            else:
-                schema = "public"
-                table = target_table
-
-            # 컬럼 정의 생성
-            column_definitions = []
-            for col in source_schema["columns"]:
-                col_name = col["name"]
-                col_type = col["type"]
-
-                # PostgreSQL 타입 매핑 - _convert_to_postgres_type 메서드 사용
-                col_type = self._convert_to_postgres_type(col_type, col.get('max_length'))
-
-                nullable = "" if col["nullable"] else " NOT NULL"
-                column_definitions.append(f"{col_name} {col_type}{nullable}")
-
-            # 임시 스테이징 테이블 생성 (UNLOGGED 권장)
-            # NOTE: TEMP 테이블은 세션 범위 제한이 있어 여러 커넥션을 사용하는 본 엔진과 맞지 않음
-            # 운영 안정성을 위해 항상 UNLOGGED를 사용하고, 머지 후 명시적으로 DROP 처리한다
-            create_temp_table_sql = f"""
-                CREATE UNLOGGED TABLE {temp_table} (
-                    {', '.join(column_definitions)}
-                )
-            """
-
-            logger.info(f"임시 테이블 생성 SQL: {create_temp_table_sql}")
-
-            # 같은 연결에서 임시 테이블 생성 및 데이터 가져오기
-            with self.target_hook.get_conn() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(create_temp_table_sql)
-                    logger.info(f"임시 테이블 생성 완료: {temp_table}")
-
-                    # 임시 테이블이 실제로 생성되었는지 확인
-                    cursor.execute(f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{temp_table}')")
-                    exists = cursor.fetchone()[0]
-                    if not exists:
-                        raise Exception(f"임시 테이블 {temp_table}이 생성되지 않았습니다.")
-
-                    return temp_table
-
-        except Exception as e:
-            logger.error(f"임시 테이블 생성 실패: {target_table}, 오류: {e!s}")
-            raise
-
-    def import_from_csv(
-        self,
-        csv_path: str,
-        temp_table: str,
-        source_schema: dict[str, Any] | None = None,
-        batch_size: int = 1000,
-    ) -> int:
-        """
-        CSV를 임시 테이블로 가져오기
-
-        Args:
-            csv_path: CSV 파일 경로
-            temp_table: 임시 테이블명
-            source_schema: 소스 테이블 스키마 정보 (선택사항)
-            batch_size: 배치 크기
-
-        Returns:
-            가져온 행 수
-        """
-        try:
-            # CSV 파일 읽기
-            df = pd.read_csv(csv_path, encoding="utf-8")
-
-            if df.empty:
-                logger.warning(f"CSV 파일 {csv_path}에 데이터가 없습니다.")
-                return 0
-
-            # 임시 테이블의 실제 컬럼명 가져오기
-            try:
-                if source_schema and source_schema.get("columns"):
-                    # 소스 스키마에서 컬럼명 가져오기
-                    schema_columns = [col["name"] for col in source_schema["columns"]]
-                    logger.info(
-                        f"소스 스키마에서 컬럼명을 가져왔습니다: {schema_columns}"
-                    )
-
-                    # CSV 컬럼명 가져오기
-                    csv_columns = list(df.columns)
-                    logger.info(f"CSV 파일의 실제 컬럼명: {csv_columns}")
-
-                    # CSV 컬럼명과 소스 스키마 컬럼명이 일치하는지 확인
-                    if len(csv_columns) != len(schema_columns):
-                        logger.warning(
-                            f"CSV 컬럼 수({len(csv_columns)})와 소스 스키마 컬럼 수({len(schema_columns)})가 일치하지 않습니다."
-                        )
-
-                    # CSV에 실제로 존재하는 컬럼만 사용 (안전한 처리)
-                    available_columns = [col for col in schema_columns if col in csv_columns]
-                    missing_columns = [col for col in schema_columns if col not in csv_columns]
-
-                    if missing_columns:
-                        logger.warning(f"CSV에 없는 컬럼: {missing_columns}")
-
-                    if not available_columns:
-                        logger.warning("CSV와 스키마 간에 공통 컬럼이 없습니다. CSV 컬럼명을 그대로 사용합니다.")
-                        available_columns = csv_columns
-
-                    # 사용 가능한 컬럼으로 데이터프레임 재구성
-                    df_reordered = df[available_columns]
-                    temp_columns = available_columns
-
-                    logger.info(
-                        f"사용 가능한 컬럼으로 데이터프레임 재구성: {len(available_columns)}개 컬럼"
-                    )
-                    logger.info(f"최종 사용 컬럼: {temp_columns}")
-                    logger.info(f"데이터프레임 형태: {df_reordered.shape}")
-                else:
-                    # 소스 스키마 정보가 없는 경우 CSV 컬럼명을 그대로 사용
-                    temp_columns = list(df.columns)
-                    logger.info(
-                        f"소스 스키마 정보가 없어 CSV 컬럼명을 그대로 사용합니다: {temp_columns}"
-                    )
-                    df_reordered = df
-
-            except Exception as e:
-                logger.error(f"컬럼 정보 처리 실패: {e}")
-                raise
-
-            # 데이터 타입 변환 및 검증
-            try:
-                # 데이터프레임의 데이터 타입을 안전하게 변환
-                for col in df_reordered.columns:
-                    # NaN 값을 None으로 변환
-                    df_reordered[col] = df_reordered[col].where(
-                        pd.notna(df_reordered[col]), None
-                    )
-
-                    # 숫자 컬럼의 경우 문자열로 변환하여 안전하게 처리
-                    if df_reordered[col].dtype in ["int64", "float64"]:
-                        df_reordered[col] = df_reordered[col].astype(str)
-
-                logger.info(f"데이터 타입 변환 완료: {len(df_reordered)}행")
-
-            except Exception as e:
-                logger.error(f"데이터 타입 변환 실패: {e}")
-                raise Exception(f"데이터 타입 변환 실패: {e}")
-
-            # INSERT 실행
-            try:
-                # 배치 크기 설정 (메모리 효율성을 위해)
-                total_inserted = 0
-
-                # 타겟 데이터베이스 연결 및 세션 최적화
-                target_hook = self.target_hook
-                
-                # 세션 최적화 적용
-                self._optimize_target_session(target_hook)
-
-                with target_hook.get_conn() as conn:
-                    with conn.cursor() as cursor:
-                        for i in range(0, len(df_reordered), batch_size):
-                            batch_df = df_reordered.iloc[i : i + batch_size]
-                            batch_data = [tuple(row) for row in batch_df.values]
-
-                            # INSERT 문 실행
-                            insert_query = f"""
-                                INSERT INTO {temp_table} ({', '.join(temp_columns)})
-                                VALUES ({', '.join(['%s'] * len(temp_columns))})
-                            """
-
-                            cursor.executemany(insert_query, batch_data)
-                            total_inserted += len(batch_data)
-
-                            if i % 10000 == 0:
-                                logger.info(
-                                    f"INSERT 진행률: {total_inserted}/{len(df_reordered)}"
-                                )
-
-                        # 커밋
-                        conn.commit()
-
-                logger.info(
-                    f"CSV 가져오기 완료: {csv_path} -> {temp_table}, 행 수: {total_inserted}"
-                )
-                return total_inserted
-
-            except Exception as e:
-                logger.error(f"INSERT 실행 실패: {e}")
-                raise Exception(f"INSERT 실행 실패: {e}")
-
-        except Exception as e:
-            logger.error(f"CSV 가져오기 실패: {csv_path} -> {temp_table}, 오류: {e!s}")
-            raise
 
     def execute_merge_operation(
         self,
@@ -4063,18 +4127,7 @@ class DataCopyEngine:
         sync_mode:
             - full_sync: 전체 동기화
             - incremental_sync: 타임스탬프/비즈니스 필드 기반 증분
-            - xmin_incremental: PostgreSQL xmin 기반 증분
         """
-        # xmin 모드면 전용 파이프라인 사용 (source_xmin 저장/머지 포함)
-        if sync_mode == "xmin_incremental":
-            return self.copy_table_data_with_xmin(
-                source_table=source_table,
-                target_table=target_table,
-                primary_keys=primary_keys,
-                sync_mode=sync_mode,
-                batch_size=batch_size,
-                custom_where=custom_where,
-            )
 
         return self._copy_table_data_internal(
             source_table=source_table,
@@ -4122,16 +4175,7 @@ class DataCopyEngine:
         Returns:
             복사 결과 딕셔너리
         """
-        # xmin 모드면 전용 파이프라인으로 라우팅 (사용자 정의 SELECT는 지원하지 않음)
-        if sync_mode == "xmin_incremental":
-            return self.copy_table_data_with_xmin(
-                source_table=source_table,
-                target_table=target_table,
-                primary_keys=primary_keys,
-                sync_mode=sync_mode,
-                batch_size=batch_size,
-                custom_where=custom_where,
-            )
+
 
         # 사용자 정의 SQL이 제공된 경우 이를 사용
         if count_sql and select_sql:
@@ -4172,25 +4216,22 @@ class DataCopyEngine:
         incremental_field_type: str | None,
     ) -> dict[str, Any]:
         """
-        테이블 데이터 복사 (내부 메서드)
+        테이블 데이터 복사 (스테이징 테이블 방식)
         """
-        csv_path = None
-        temp_table = None
-
         try:
             start_time = pd.Timestamp.now()
 
-            # WHERE 조건 구성 (custom_where 우선, where_clause는 기본값)
-            final_where_clause = self._build_where_clause(
-                custom_where=custom_where,
-                where_clause=None,
-                sync_mode=sync_mode,
-                incremental_field=incremental_field,
-                incremental_field_type=incremental_field_type,
-                target_table=target_table
-            )
+            # WHERE 조건 구성
+            where_condition = None
+            if custom_where:
+                where_condition = custom_where
+            elif incremental_field and incremental_field_type:
+                # 증분 동기화 조건 구성
+                where_condition = self._build_incremental_where_condition(
+                    incremental_field, incremental_field_type, target_table
+                )
 
-            logger.info(f"최종 WHERE 조건: {final_where_clause}")
+            logger.info(f"최종 WHERE 조건: {where_condition}")
 
             # 1. 소스 테이블 스키마 조회
             logger.info(f"소스 테이블 스키마 조회 시작: {source_table}")
@@ -4201,73 +4242,53 @@ class DataCopyEngine:
                     f"소스 테이블 {source_table}의 스키마 정보를 가져올 수 없습니다."
                 )
 
-            # 2. CSV로 내보내기 (소스 DB에서 - 다른 세션)
-            csv_path = os.path.join(
-                self.temp_dir, f"temp_{os.path.basename(source_table)}.csv"
+            # 2. 스테이징 테이블 방식으로 데이터 복사 실행
+            logger.info(f"스테이징 테이블 방식으로 데이터 복사 시작: {source_table} -> {target_table}")
+            
+            staging_result = self.copy_with_staging_table(
+                source_table=source_table,
+                target_table=target_table,
+                primary_keys=primary_keys,
+                where_condition=where_condition
             )
-            logger.info(f"CSV 내보내기 시작: {source_table} -> {csv_path}")
-            exported_rows = self.export_to_csv(
-                source_table, csv_path, final_where_clause, batch_size, incremental_field
-            )
-
-            if exported_rows == 0:
-                return {
-                    "status": "warning",
-                    "message": f"소스 테이블 {source_table}에 조건에 맞는 데이터가 없습니다. WHERE: {final_where_clause}",
-                    "execution_time": 0,
-                }
-
-            # 3. 하나의 세션에서 임시 테이블 생성, 데이터 삽입, MERGE 작업 수행 (세션 격리 문제 해결)
-            logger.info(
-                f"타겟 DB에서 임시 테이블 생성, 데이터 삽입, MERGE 작업 시작: {target_table}"
-            )
-
-            # 타겟 DB에서 하나의 연결로 모든 작업 수행
-            with self.target_hook.get_conn() as target_conn:
-                with target_conn.cursor() as cursor:
-                    # 3-1. 임시 테이블 생성 (소스 스키마 기반)
-                    temp_table = self._create_temp_table_in_session(
-                        cursor, target_table, source_schema
-                    )
-                    logger.info(f"임시 테이블 생성 완료: {temp_table}")
-
-                    # 3-2. CSV 데이터 삽입
-                    imported_rows = self._import_csv_in_session(
-                        cursor, temp_table, csv_path, source_schema, batch_size
-                    )
-                    logger.info(
-                        f"CSV 데이터 삽입 완료: {temp_table}, 행 수: {imported_rows}"
-                    )
-
-                    # 3-3. MERGE 작업 실행 (같은 연결에서)
-                    merge_result = self._execute_merge_in_session(
-                        cursor, temp_table, target_table, primary_keys, sync_mode
-                    )
-                    logger.info(f"MERGE 작업 완료: {temp_table} -> {target_table}")
-
-                # 모든 작업이 성공하면 커밋
-                target_conn.commit()
-                logger.info("모든 작업이 성공적으로 커밋되었습니다.")
-
+            
             end_time = pd.Timestamp.now()
             total_time = (end_time - start_time).total_seconds()
 
-            # 5. 결과 정리
+            # 3. 결과 정리
+            copy_result = staging_result.get('copy_result', {})
+            exported_rows = copy_result.get('staging_count', 0)
+            imported_rows = copy_result.get('target_count', 0)
+            
             final_result = {
                 "status": "success",
                 "source_table": source_table,
                 "target_table": target_table,
                 "exported_rows": exported_rows,
                 "imported_rows": imported_rows,
-                "merge_result": merge_result,
                 "total_execution_time": total_time,
-                "where_clause_used": final_where_clause,
-                "sync_mode": sync_mode,
-                "message": (
-                    f"테이블 복사 완료: {source_table} -> {target_table}, "
-                    f"WHERE: {final_where_clause}, "
-                    f"총 소요시간: {total_time:.2f}초"
-                ),
+                "message": f"스테이징 테이블 방식으로 데이터 복사 완료: {imported_rows}행",
+                "staging_result": staging_result
+            }
+
+            logger.info(f"스테이징 테이블 방식 데이터 복사 완료: {final_result}")
+            return final_result
+
+        except Exception as e:
+            end_time = pd.Timestamp.now()
+            total_time = (end_time - start_time).total_seconds()
+            
+            error_msg = f"스테이징 테이블 방식 데이터 복사 실패: {e}"
+            logger.error(error_msg)
+            
+            return {
+                "status": "error",
+                "source_table": source_table,
+                "target_table": target_table,
+                "exported_rows": 0,
+                "imported_rows": 0,
+                "total_execution_time": total_time,
+                "error": error_msg
             }
 
             logger.info(final_result["message"])
@@ -4315,70 +4336,46 @@ class DataCopyEngine:
         select_sql: str,
     ) -> dict[str, Any]:
         """
-        사용자 정의 SQL을 사용하여 테이블 데이터 복사 (내부 메서드)
+        사용자 정의 SQL을 사용하여 테이블 데이터 복사 (스테이징 테이블 방식)
         """
-        csv_path = None
         start_time = time.time()
 
         try:
-            # 1단계: 데이터 내보내기 (사용자 정의 SQL 사용)
-            logger.info(f"사용자 정의 SQL을 사용하여 데이터 내보내기 시작: {source_table}")
-
-            # 전체 행 수 조회 (사용자 정의 COUNT SQL 사용)
-            if count_sql:
-                total_count = self.source_hook.get_first(count_sql)[0]
-                logger.info(f"사용자 정의 COUNT SQL로 조회된 행 수: {total_count}")
-            else:
-                total_count = self.db_ops.get_table_row_count(source_table, where_clause=custom_where)
-
-            if total_count == 0:
-                logger.warning(f"테이블 {source_table}에 데이터가 없습니다.")
-                return {
-                    "status": "success",
-                    "exported_rows": 0,
-                    "imported_rows": 0,
-                    "total_execution_time": 0,
-                    "message": "데이터가 없습니다."
-                }
-
-            # CSV 파일 경로 생성
-            csv_path = f"/tmp/temp_{source_table.replace('.', '_')}.csv"
-
-            # 사용자 정의 SELECT SQL을 사용하여 데이터 추출
-            if select_sql:
-                logger.info(f"사용자 정의 SELECT SQL 사용: {select_sql}")
-                exported_rows = self._export_with_custom_sql(select_sql, csv_path, batch_size)
-            else:
-                # 기본 내보내기 사용
-                exported_rows = self.export_to_csv(
-                    source_table, csv_path, custom_where, batch_size, incremental_field
+            # 1단계: WHERE 조건 구성
+            where_condition = None
+            if custom_where:
+                where_condition = custom_where
+            elif incremental_field and incremental_field_type:
+                # 증분 동기화 조건 구성
+                where_condition = self._build_incremental_where_condition(
+                    incremental_field, incremental_field_type, target_table
                 )
 
-            if exported_rows == 0:
-                logger.warning(f"내보낸 데이터가 없습니다.")
-                return {
-                    "status": "success",
-                    "exported_rows": 0,
-                    "imported_rows": 0,
-                    "total_execution_time": time.time() - start_time,
-                    "message": "내보낸 데이터가 없습니다."
-                }
+            logger.info(f"사용자 정의 SQL을 사용한 데이터 복사 시작: {source_table} -> {target_table}")
+            logger.info(f"WHERE 조건: {where_condition}")
 
-            # 2단계: 데이터 가져오기
-            logger.info(f"타겟 DB에서 임시 테이블 생성, 데이터 삽입, MERGE 작업 시작: {target_table}")
-            imported_rows = self._import_and_merge_data(
-                csv_path, target_table, primary_keys, sync_mode
+            # 2단계: 스테이징 테이블 방식으로 데이터 복사 실행
+            staging_result = self.copy_with_staging_table(
+                source_table=source_table,
+                target_table=target_table,
+                primary_keys=primary_keys,
+                where_condition=where_condition
             )
-
+            
             # 3단계: 결과 정리
             total_time = time.time() - start_time
+            
+            copy_result = staging_result.get('copy_result', {})
+            exported_rows = copy_result.get('staging_count', 0)
+            imported_rows = copy_result.get('target_count', 0)
 
             result = {
                 "status": "success",
                 "exported_rows": exported_rows,
                 "imported_rows": imported_rows,
                 "total_execution_time": total_time,
-                "message": f"데이터 복사 완료: {exported_rows}행 내보내기, {imported_rows}행 가져오기"
+                "message": f"스테이징 테이블 방식으로 데이터 복사 완료: {imported_rows}행",
+                "staging_result": staging_result
             }
 
             logger.info(f"사용자 정의 SQL을 사용한 데이터 복사 완료: {result}")
@@ -4398,15 +4395,6 @@ class DataCopyEngine:
             }
 
             return result
-
-        finally:
-            # 임시 파일 정리
-            if csv_path and os.path.exists(csv_path):
-                try:
-                    os.remove(csv_path)
-                    logger.info(f"임시 파일 삭제 완료: {csv_path}")
-                except Exception as e:
-                    logger.warning(f"임시 파일 삭제 실패: {e}")
 
     def _export_with_custom_sql(self, select_sql: str, csv_path: str, batch_size: int, source_schema: dict[str, Any] = None) -> int:
         """
@@ -4613,33 +4601,36 @@ class DataCopyEngine:
                     "message": "조건에 맞는 데이터가 없음"
                 }
 
-            # 4단계: CSV 파일로 데이터 내보내기
-            csv_path = f"/tmp/temp_{source_table.replace('.', '_')}.csv"
-            exported_rows = self._export_with_custom_sql(select_sql, csv_path, batch_size, source_schema)
-
-            if exported_rows == 0:
-                raise Exception("데이터 내보내기 실패")
-
-            # 5단계: 데이터 가져오기 및 MERGE (검증된 스키마 사용)
-            if verified_target_schema:
-                # 검증된 스키마가 있으면 직접 사용
-                imported_rows = self._import_and_merge_with_verified_schema(
-                    csv_path, target_table, primary_keys, sync_mode, verified_target_schema
+            # 4단계: 스테이징 테이블 방식으로 데이터 복사
+            logger.info(f"스테이징 테이블 방식으로 데이터 복사 시작: {source_table} -> {target_table}")
+            
+            # WHERE 조건 구성
+            where_condition = None
+            if custom_where:
+                where_condition = custom_where
+            elif incremental_field and incremental_field_type:
+                # 증분 동기화 조건 구성
+                where_condition = self._build_incremental_where_condition(
+                    incremental_field, incremental_field_type, target_table
                 )
-            else:
-                # 기존 방식 사용
-                imported_rows = self._import_and_merge_data(
-                    csv_path, target_table, primary_keys, sync_mode
-                )
-
+            
+            # 스테이징 테이블 방식으로 데이터 복사 실행
+            staging_result = self.copy_with_staging_table(
+                source_table=source_table,
+                target_table=target_table,
+                primary_keys=primary_keys,
+                where_condition=where_condition
+            )
+            
             total_time = time.time() - start_time
 
             result = {
                 "status": "success",
-                "exported_rows": exported_rows,
-                "imported_rows": imported_rows,
+                "source_table": source_table,
+                "target_table": target_table,
+                "staging_result": staging_result,
                 "total_execution_time": total_time,
-                "message": f"데이터 복사 완료: {exported_rows}행 내보내기, {imported_rows}행 가져오기"
+                "message": f"스테이징 테이블 방식 데이터 복사 완료: {staging_result.get('copy_result', {}).get('staging_count', 0)}행 처리"
             }
 
             logger.info(f"사용자 정의 SQL을 사용한 데이터 복사 완료: {result}")
@@ -4708,6 +4699,204 @@ class DataCopyEngine:
         except Exception as e:
             logger.error(f"사용자 정의 SQL 쿼리 생성 실패: {e}")
             raise
+
+    def _build_incremental_where_condition(
+        self, 
+        incremental_field: str, 
+        incremental_field_type: str, 
+        target_table: str
+    ) -> str:
+        """
+        증분 동기화를 위한 WHERE 조건 생성
+        
+        Args:
+            incremental_field: 증분 필드명
+            incremental_field_type: 증분 필드 타입
+            target_table: 타겟 테이블명
+        
+        Returns:
+            WHERE 조건 문자열
+        """
+        try:
+            # 타겟 테이블에서 최신 값 조회
+            latest_value = self._get_latest_incremental_value(target_table, incremental_field)
+            
+            if latest_value is None:
+                # 최신 값이 없으면 모든 데이터 처리
+                return ""
+            
+            # 필드 타입에 따른 조건 생성
+            if incremental_field_type == "yyyymmdd":
+                return f"{incremental_field} > '{latest_value}'"
+            elif incremental_field_type in ["integer", "bigint", "smallint"]:
+                return f"{incremental_field} > {latest_value}"
+            elif incremental_field_type in ["timestamp", "timestamptz"]:
+                return f"{incremental_field} > '{latest_value}'"
+            else:
+                # 기본적으로 문자열 비교
+                return f"{incremental_field} > '{latest_value}'"
+                
+        except Exception as e:
+            logger.error(f"증분 WHERE 조건 생성 실패: {str(e)}")
+            # 에러 발생 시 모든 데이터 처리
+            return ""
+
+    def _get_latest_incremental_value(self, target_table: str, incremental_field: str) -> Any:
+        """
+        타겟 테이블에서 증분 필드의 최신 값 조회
+        
+        Args:
+            target_table: 타겟 테이블명
+            incremental_field: 증분 필드명
+        
+        Returns:
+            최신 값 또는 None
+        """
+        try:
+            # 입력값 유효성 검증
+            if not target_table or not incremental_field:
+                logger.warning("target_table 또는 incremental_field가 비어있습니다")
+                return None
+            
+            # 필드명 유효성 검증 (SQL 인젝션 방지)
+            if not self._is_valid_field_name(incremental_field):
+                logger.warning(f"유효하지 않은 필드명: {incremental_field}")
+                return None
+            
+            # 타겟 테이블이 존재하는지 확인
+            if not self._table_exists(target_table):
+                return None
+            
+            # 최신 값 조회 (파라미터화된 쿼리 사용)
+            query = "SELECT MAX(%s) FROM %s"
+            
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    # 테이블명과 필드명을 식별자로 처리
+                    cursor.execute(query, (incremental_field, target_table))
+                    result = cursor.fetchone()
+                    return result[0] if result else None
+                    
+        except Exception as e:
+            logger.error(f"최신 증분 값 조회 실패: {str(e)}")
+            return None
+
+    def _is_valid_field_name(self, field_name: str) -> bool:
+        """
+        필드명 유효성 검증 (SQL 인젝션 방지)
+        
+        Args:
+            field_name: 검증할 필드명
+        
+        Returns:
+            유효성 여부
+        """
+        if not field_name or not isinstance(field_name, str):
+            return False
+        
+        # PostgreSQL 식별자 규칙 검증 (한글 지원)
+        # 허용되는 문자: 영문자, 숫자, 언더스코어, 달러 기호, 한글
+        # 첫 글자는 영문자, 언더스코어, 한글이어야 함
+        import re
+        pattern = r'^[a-zA-Z가-힣_][a-zA-Z0-9가-힣_$]*$'
+        
+        return bool(re.match(pattern, field_name))
+
+    def _table_exists(self, table_name: str) -> bool:
+        """
+        테이블 존재 여부 확인
+        
+        Args:
+            table_name: 테이블명
+        
+        Returns:
+            테이블 존재 여부
+        """
+        try:
+            # 테이블명 유효성 검증
+            if not self._is_valid_table_name(table_name):
+                logger.warning(f"유효하지 않은 테이블명: {table_name}")
+                return False
+            
+            # 스키마와 테이블명 분리
+            if "." in table_name:
+                schema, table = table_name.split(".", 1)
+            else:
+                schema = "public"
+                table = table_name
+            
+            # 스키마와 테이블명 유효성 검증
+            if not self._is_valid_schema_name(schema) or not self._is_valid_table_name(table):
+                logger.warning(f"유효하지 않은 스키마 또는 테이블명: {schema}.{table}")
+                return False
+            
+            query = """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = %s AND table_name = %s
+                )
+            """
+            
+            with self.target_hook.get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (schema, table))
+                    result = cursor.fetchone()
+                    return result[0] if result else False
+                    
+        except Exception as e:
+            logger.error(f"테이블 존재 여부 확인 실패: {str(e)}")
+            return False
+
+    def _is_valid_table_name(self, table_name: str) -> bool:
+        """
+        테이블명 유효성 검증 (SQL 인젝션 방지)
+        
+        Args:
+            table_name: 검증할 테이블명
+        
+        Returns:
+            유효성 여부
+        """
+        if not table_name or not isinstance(table_name, str):
+            return False
+        
+        # PostgreSQL 식별자 규칙 검증 (한글 지원)
+        # 허용되는 문자: 영문자, 숫자, 언더스코어, 달러 기호, 한글, 점(.)
+        # 첫 글자는 영문자, 언더스코어, 한글이어야 함
+        import re
+        
+        # 스키마.테이블명 형식 지원
+        if '.' in table_name:
+            schema, table = table_name.split('.', 1)
+            # 스키마명과 테이블명 모두 검증
+            return (self._is_valid_schema_name(schema) and 
+                   self._is_valid_table_name(table))
+        
+        # 한글, 영문, 숫자, 언더스코어, 달러 기호 허용
+        pattern = r'^[a-zA-Z가-힣_][a-zA-Z0-9가-힣_$]*$'
+        
+        return bool(re.match(pattern, table_name))
+
+    def _is_valid_schema_name(self, schema_name: str) -> bool:
+        """
+        스키마명 유효성 검증 (SQL 인젝션 방지)
+        
+        Args:
+            schema_name: 검증할 스키마명
+        
+        Returns:
+            유효성 여부
+        """
+        if not schema_name or not isinstance(schema_name, str):
+            return False
+        
+        # PostgreSQL 식별자 규칙 검증 (한글 지원)
+        # 허용되는 문자: 영문자, 숫자, 언더스코어, 달러 기호, 한글
+        # 첫 글자는 영문자, 언더스코어, 한글이어야 함
+        import re
+        pattern = r'^[a-zA-Z가-힣_][a-zA-Z0-9가-힣_$]*$'
+        
+        return bool(re.match(pattern, schema_name))
 
     def _apply_column_transformation(self, column_name: str, data_type: str) -> str:
         """컬럼별 데이터 변환 적용"""
@@ -5563,19 +5752,7 @@ class DataCopyEngine:
                 "execution_time": 0
             }
 
-    def copy_table_data_with_xmin(
-        self,
-        source_table: str,
-        target_table: str,
-        primary_keys: list[str],
-        sync_mode: str = "xmin_incremental",
-        batch_size: int = 5000,
-        custom_where: str | None = None,
-        # 청크 방식 파라미터 추가
-        chunk_mode: bool = True,
-        enable_checkpoint: bool = True,
-        max_retries: int = 3,
-    ) -> dict[str, Any]:
+
         """
         xmin 기반 증분 데이터 복사 (실제 xmin 값 저장)
         

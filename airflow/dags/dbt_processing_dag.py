@@ -86,7 +86,7 @@ def create_dbt_run_dag(**context):
                 "host": "{{ env_var('POSTGRES_HOST', 'postgres') }}",
                 "user": "{{ env_var('POSTGRES_USER', 'airflow') }}",
                 "password": "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}",
-                "port": 5432,
+                "port": 15432,  # 외부 포트로 변경
                 "dbname": "{{ env_var('POSTGRES_DB', 'airflow') }}",
             },
         ),
@@ -112,17 +112,14 @@ def create_dbt_test_dag(**context):
     dbt_configs = configs["dbt_configs"]
 
     # Profile configuration for dbt
-    profile_config = ProfileConfig(
-        profile_name="postgres_data_copy",
-        target_name="dev",
-        profile_mapping=PostgresUserPasswordProfileMapping(
+    profile_mapping=PostgresUserPasswordProfileMapping(
             conn_id="airflow_db",
             profile_args={
                 "schema": "raw_data",
                 "host": "{{ env_var('POSTGRES_HOST', 'postgres') }}",
                 "user": "{{ env_var('POSTGRES_USER', 'airflow') }}",
                 "password": "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}",
-                "port": 5432,
+                "port": 15432,  # 외부 포트로 변경
                 "dbname": "{{ env_var('POSTGRES_DB', 'airflow') }}",
             },
         ),
@@ -156,7 +153,7 @@ def create_dbt_docs_dag(**context):
                 "host": "{{ env_var('POSTGRES_HOST', 'postgres') }}",
                 "user": "{{ env_var('POSTGRES_USER', 'airflow') }}",
                 "password": "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}",
-                "port": 5432,
+                "port": 15432,  # 외부 포트로 변경
                 "dbname": "{{ env_var('POSTGRES_DB', 'airflow') }}",
             },
         ),

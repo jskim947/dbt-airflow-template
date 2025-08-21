@@ -23,7 +23,7 @@ profile_config = ProfileConfig(
             "host": "{{ env_var('POSTGRES_HOST', 'postgres') }}",
             "user": "{{ env_var('POSTGRES_USER', 'airflow') }}",
             "password": "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}",
-            "port": 5432,
+            "port": 15432,  # 외부 포트로 변경
             "dbname": "{{ env_var('POSTGRES_DB', 'airflow') }}",
         },
     ),

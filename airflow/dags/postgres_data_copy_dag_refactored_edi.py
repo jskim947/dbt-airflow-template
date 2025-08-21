@@ -26,13 +26,13 @@ from typing import Any
 
 # 공통 모듈 import
 from common import (
-    DatabaseOperations,
-    DataCopyEngine,
-    MonitoringManager,
-    ProgressTracker,
     DAGConfigManager,
     DAGSettings,
     ConnectionManager,
+    DataCopyEngine,
+    DatabaseOperations,
+    MonitoringManager,
+    ProgressTracker,
 )
 
 # 청크 방식 설정 헬퍼 함수
@@ -74,9 +74,10 @@ dag = DAGConfigManager.create_dag(
     max_active_runs=DAGSettings.DEFAULT_DAG_CONFIG["max_active_runs"]
 )
 
-# 연결 ID 설정
-SOURCE_CONN_ID = ConnectionManager.get_source_connection_id()
-TARGET_CONN_ID = ConnectionManager.get_target_connection_id()
+# 연결 ID 설정 (DAGConfigManager에서 가져오기)
+dag_config = DAGConfigManager.get_dag_config("postgres_multi_table_copy_refactored")
+SOURCE_CONN_ID = dag_config.get("source_connection", "fs2_postgres")
+TARGET_CONN_ID = dag_config.get("target_connection", "postgres_default")
 
 # EDI 테이블 설정 (공통 설정 사용)
 EDI_TABLES_CONFIG = DAGSettings.get_edi_table_configs()

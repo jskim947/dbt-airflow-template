@@ -20,9 +20,11 @@ from typing import Any
 
 # 공통 모듈 import
 from common import (
-    DatabaseOperations,
+    DAGConfigManager,
+    DAGSettings,
+    ConnectionManager,
     DataCopyEngine,
-    DBTIntegration,
+    DatabaseOperations,
     MonitoringManager,
     ProgressTracker,
 )
@@ -69,9 +71,10 @@ dag = DAGConfigManager.create_dag(
     max_active_runs=DAGSettings.DEFAULT_DAG_CONFIG["max_active_runs"]
 )
 
-# 연결 ID 설정
-SOURCE_CONN_ID = ConnectionManager.get_source_connection_id()
-TARGET_CONN_ID = ConnectionManager.get_target_connection_id()
+# 연결 ID 설정 (DAGConfigManager에서 가져오기)
+dag_config = DAGConfigManager.get_dag_config("postgres_multi_table_copy_refactored")
+SOURCE_CONN_ID = dag_config.get("source_connection", "fs2_postgres")
+TARGET_CONN_ID = dag_config.get("target_connection", "postgres_default")
 
 # dbt 프로젝트 경로 설정
 DBT_PROJECT_PATH = "/opt/airflow/dbt"
@@ -261,8 +264,14 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
 
         # 5단계: 데이터 무결성 검증
         progress.start_step("데이터 무결성 검증", "복사된 데이터의 무결성 검증")
+        
+        # WHERE 조건이 있는 경우 무결성 검증에도 적용
+        where_clause = table_config.get("custom_where")
         validation_result = db_ops.validate_data_integrity(
-            table_config["source"], table_config["target"], table_config["primary_key"]
+            table_config["source"], 
+            table_config["target"], 
+            table_config["primary_key"],
+            where_clause=where_clause
         )
         progress.complete_step("데이터 무결성 검증", validation_result)
 
@@ -296,263 +305,6 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
         from common import ErrorHandler
         error_handler = ErrorHandler(context)
         error_handler.handle_data_error("테이블 복사", table_config['source'], e)
-
-
-def copy_data_with_xmin_incremental(table_config: dict[str, Any], **context) -> dict[str, Any]:
-    """xmin 기반 증분 데이터 복사"""
-    try:
-        task_id = context["task_instance"].task_id
-        table_name = table_config["source"]
-
-        # 모니터링 시작
-        monitoring = MonitoringManager(f"xmin 증분 복사 - {table_name}")
-        monitoring.start_monitoring()
-
-        # 진행 상황 추적
-        progress = ProgressTracker(7, f"xmin 증분 복사 - {table_name}")
-
-        # 1단계: 데이터베이스 작업 객체 생성
-        progress.start_step(
-            "데이터베이스 작업 객체 생성", "DatabaseOperations 및 DataCopyEngine 초기화"
-        )
-        db_ops = DatabaseOperations(SOURCE_CONN_ID, TARGET_CONN_ID)
-        copy_engine = DataCopyEngine(db_ops)
-        progress.complete_step("데이터베이스 작업 객체 생성")
-
-        monitoring.add_checkpoint(
-            "객체 생성", "DatabaseOperations 및 DataCopyEngine 객체 생성 완료"
-        )
-
-        # 2단계: xmin 기반 처리 가능 여부 확인
-        progress.start_step(
-            "xmin 처리 가능 여부 확인", "xmin 안정성 및 복제 상태 확인"
-        )
-        
-        # xmin 안정성 검증
-        xmin_stability = db_ops.validate_xmin_stability(table_config["source"])
-        monitoring.add_checkpoint("xmin 안정성", f"xmin 안정성: {xmin_stability}")
-        
-        # 복제 상태 확인
-        replication_ok = db_ops.check_replication_status(table_config["source"])
-        monitoring.add_checkpoint("복제 상태", f"복제 상태: {'OK' if replication_ok else 'Replica'}")
-        
-        progress.complete_step("xmin 처리 가능 여부 확인", {
-            "xmin_stability": xmin_stability,
-            "replication_ok": replication_ok
-        })
-
-        # 3단계: 타겟 테이블 준비 (source_xmin 컬럼 포함)
-        progress.start_step(
-            "타겟 테이블 준비", f"타겟 테이블 {table_config['target']} 준비 및 source_xmin 컬럼 확인"
-        )
-        
-        # 기존 테이블 존재 확인 및 생성
-        db_ops.ensure_target_table_exists(table_config, **context)
-        
-        # source_xmin 컬럼 확인 및 추가
-        xmin_column_result = db_ops.ensure_xmin_column_exists(table_config["target"])
-        monitoring.add_checkpoint("source_xmin 컬럼", xmin_column_result)
-        
-        progress.complete_step("타겟 테이블 준비")
-
-        # 4단계: xmin 기반 증분 데이터 복사 실행
-        progress.start_step(
-            "xmin 기반 데이터 복사", f"테이블 {table_name}에서 {table_config['target']}로 xmin 기반 증분 복사"
-        )
-
-        # xmin 기반 복사에서도 청크 방식 설정 (헬퍼 함수 사용)
-        chunk_settings = get_chunk_mode_settings(table_config)
-        
-        # 청크 방식 설정 로깅 (xmin 기반)
-        if chunk_settings["chunk_mode"]:
-            logger.info(f"xmin 기반 청크 방식 데이터 복사 활성화: {table_name}")
-            logger.info(f"체크포인트: {'활성화' if chunk_settings['enable_checkpoint'] else '비활성화'}")
-            logger.info(f"최대 재시도: {chunk_settings['max_retries']}회")
-            monitoring.add_checkpoint("xmin 청크 방식", f"활성화 (체크포인트: {'활성화' if chunk_settings['enable_checkpoint'] else '비활성화'})")
-        else:
-            logger.info(f"xmin 기반 기존 방식 데이터 복사: {table_name}")
-            monitoring.add_checkpoint("xmin 데이터 복사 방식", "기존 방식 (메모리 누적)")
-        
-        copy_result = copy_engine.copy_table_data_with_xmin(
-            source_table=table_config["source"],
-            target_table=table_config["target"],
-            primary_keys=table_config["primary_key"],
-            sync_mode="xmin_incremental",
-            batch_size=table_config.get("batch_size", 5000),  # xmin 처리는 기본값 5000
-            custom_where=table_config.get("custom_where"),
-            # 청크 방식 파라미터 추가 (헬퍼 함수 사용)
-            chunk_mode=chunk_settings["chunk_mode"],
-            enable_checkpoint=chunk_settings["enable_checkpoint"],
-            max_retries=chunk_settings["max_retries"]
-        )
-
-        if copy_result["status"] == "error":
-            progress.fail_step("xmin 기반 데이터 복사", copy_result.get("message", "알 수 없는 오류"))
-            monitoring.add_error(f"xmin 기반 데이터 복사 실패: {copy_result.get('message', '알 수 없는 오류')}")
-            monitoring.stop_monitoring("failed")
-            raise Exception(f"xmin 기반 데이터 복사 실패: {copy_result.get('message', '알 수 없는 오류')}")
-
-        progress.complete_step("xmin 기반 데이터 복사", copy_result)
-
-        monitoring.add_checkpoint(
-            "xmin 기반 데이터 복사", f"xmin 기반 데이터 복사 완료: {copy_result.get('records_processed', 0)}행 처리"
-        )
-        
-        # xmin 관련 정보 추가
-        if "last_xmin" in copy_result and "latest_xmin" in copy_result:
-            monitoring.add_checkpoint(
-                "xmin 범위", f"처리된 xmin 범위: {copy_result['last_xmin']} ~ {copy_result['latest_xmin']}"
-            )
-
-        # 5단계: 데이터 무결성 검증
-        progress.start_step("데이터 무결성 검증", "복사된 데이터의 무결성 검증")
-        validation_result = db_ops.validate_data_integrity(
-            table_config["source"], table_config["target"], table_config["primary_key"]
-        )
-        progress.complete_step("데이터 무결성 검증", validation_result)
-
-        if not validation_result["is_valid"]:
-            monitoring.add_warning(
-                f"데이터 무결성 검증 실패: {validation_result['message']}"
-            )
-
-        # 6단계: xmin 기반 증분 동기화 무결성 검증
-        progress.start_step("xmin 증분 동기화 무결성 검증", "xmin 기반 증분 동기화의 무결성 검증")
-        
-        # 마지막 처리된 xmin 값과 소스의 최신 xmin 값 비교
-        last_processed_xmin = db_ops.get_last_processed_xmin_from_target(table_config["target"])
-        _, latest_source_xmin = db_ops.build_xmin_incremental_condition(
-            table_config["source"], table_config["target"], last_processed_xmin
-        )
-        
-        xmin_integrity = {
-            "last_processed_xmin": last_processed_xmin,
-            "latest_source_xmin": latest_source_xmin,
-            "is_synchronized": last_processed_xmin >= latest_source_xmin if latest_source_xmin > 0 else True
-        }
-        
-        progress.complete_step("xmin 증분 동기화 무결성 검증", xmin_integrity)
-        
-        if not xmin_integrity["is_synchronized"]:
-            monitoring.add_warning(
-                f"xmin 동기화 지연: 마지막 처리 xmin({last_processed_xmin}) < 최신 소스 xmin({latest_source_xmin})"
-            )
-
-        # 7단계: 모니터링 완료
-        progress.complete_step("모니터링 완료")
-        monitoring.add_checkpoint(
-            "작업 완료", f"테이블 {table_name} xmin 기반 증분 복사 작업 완료"
-        )
-        monitoring.stop_monitoring("completed")
-
-        return {
-            "status": "success",
-            "table_name": table_name,
-            "copy_result": copy_result,
-            "validation_result": validation_result,
-            "xmin_integrity": xmin_integrity,
-            "monitoring_summary": monitoring.get_summary(),
-            "progress_summary": progress.get_summary(),
-        }
-
-    except Exception as e:
-        from common import ErrorHandler
-        error_handler = ErrorHandler(context)
-        error_handler.handle_processing_error("xmin 기반 증분 복사", "xmin_data_copy", e)
-
-
-def validate_xmin_incremental_integrity(table_config: dict[str, Any], **context) -> dict[str, Any]:
-    """xmin 기반 증분 동기화 무결성 검증"""
-    try:
-        task_id = context["task_instance"].task_id
-        table_name = table_config["source"]
-
-        # 모니터링 시작
-        monitoring = MonitoringManager(f"xmin 무결성 검증 - {table_name}")
-        monitoring.start_monitoring()
-
-        # 진행 상황 추적
-        progress = ProgressTracker(4, f"xmin 무결성 검증 - {table_name}")
-
-        # 1단계: 데이터베이스 작업 객체 생성
-        progress.start_step(
-            "데이터베이스 작업 객체 생성", "DatabaseOperations 초기화"
-        )
-        db_ops = DatabaseOperations(SOURCE_CONN_ID, TARGET_CONN_ID)
-        progress.complete_step("데이터베이스 작업 객체 생성")
-
-        # 2단계: xmin 상태 확인
-        progress.start_step(
-            "xmin 상태 확인", "소스 및 타겟 테이블의 xmin 상태 확인"
-        )
-        
-        # 소스 테이블 xmin 상태
-        source_xmin_stability = db_ops.validate_xmin_stability(table_config["source"])
-        monitoring.add_checkpoint("소스 xmin 안정성", f"안정성: {source_xmin_stability}")
-        
-        # 타겟 테이블 마지막 처리 xmin
-        last_processed_xmin = db_ops.get_last_processed_xmin_from_target(table_config["target"])
-        monitoring.add_checkpoint("마지막 처리 xmin", f"값: {last_processed_xmin}")
-        
-        # 소스 테이블 최신 xmin
-        _, latest_source_xmin = db_ops.build_xmin_incremental_condition(
-            table_config["source"], table_config["target"], last_processed_xmin
-        )
-        monitoring.add_checkpoint("최신 소스 xmin", f"값: {latest_source_xmin}")
-        
-        progress.complete_step("xmin 상태 확인", {
-            "source_stability": source_xmin_stability,
-            "last_processed": last_processed_xmin,
-            "latest_source": latest_source_xmin
-        })
-
-        # 3단계: 무결성 검증
-        progress.start_step(
-            "무결성 검증", "xmin 기반 증분 동기화 무결성 검증"
-        )
-        
-        # 동기화 상태 확인
-        is_synchronized = last_processed_xmin >= latest_source_xmin if latest_source_xmin > 0 else True
-        sync_gap = max(0, latest_source_xmin - last_processed_xmin) if latest_source_xmin > 0 else 0
-        
-        # 데이터 일치 여부 확인
-        data_integrity = db_ops.validate_data_integrity(
-            table_config["source"], table_config["target"], table_config["primary_key"]
-        )
-        
-        integrity_result = {
-            "is_synchronized": is_synchronized,
-            "sync_gap": sync_gap,
-            "last_processed_xmin": last_processed_xmin,
-            "latest_source_xmin": latest_source_xmin,
-            "data_integrity": data_integrity,
-            "overall_status": "healthy" if (is_synchronized and data_integrity["is_valid"]) else "warning"
-        }
-        
-        progress.complete_step("무결성 검증", integrity_result)
-        
-        # 4단계: 모니터링 완료
-        progress.complete_step("모니터링 완료")
-        
-        if integrity_result["overall_status"] == "healthy":
-            monitoring.add_checkpoint("무결성 상태", "모든 검증 통과 - 정상 상태")
-            monitoring.stop_monitoring("completed")
-        else:
-            monitoring.add_warning(f"무결성 경고: 동기화 지연({sync_gap}) 또는 데이터 불일치")
-            monitoring.stop_monitoring("warning")
-
-        return {
-            "status": "success",
-            "table_name": table_name,
-            "integrity_result": integrity_result,
-            "monitoring_summary": monitoring.get_summary(),
-            "progress_summary": progress.get_summary(),
-        }
-
-    except Exception as e:
-        from common import ErrorHandler
-        error_handler = ErrorHandler(context)
-        error_handler.handle_processing_error("xmin 무결성 검증", "xmin_integrity_validation", e)
 
 
 def execute_dbt_pipeline(**context) -> dict[str, Any]:

@@ -227,3 +227,93 @@ dbt run --log-level debug
 ---
 
 **참고**: 이 프로젝트는 PostgreSQL과 Airflow를 사용하는 데이터 엔지니어링 워크플로우를 위한 템플릿입니다. 프로덕션 환경에서 사용하기 전에 보안 및 성능 요구사항을 충족하는지 확인하세요.
+
+## FastAPI 데이터베이스 API
+
+이 프로젝트는 PostgreSQL 데이터베이스 조회를 위한 FastAPI를 포함하고 있습니다.
+
+### 실행 방법
+
+#### 1. Docker Compose로 실행 (권장)
+```bash
+cd docker
+docker-compose up -d api
+```
+
+#### 2. 직접 실행
+```bash
+# 의존성 설치
+pip install fastapi uvicorn[standard] asyncpg
+
+# API 실행
+python run_api.py
+```
+
+### API 엔드포인트
+
+#### 기본 정보
+- **루트**: `GET /` - API 정보 및 사용 가능한 엔드포인트
+- **헬스체크**: `GET /health` - 서버 상태 확인
+- **API 문서**: `GET /docs` - Swagger UI
+- **ReDoc**: `GET /redoc` - ReDoc 문서
+
+#### 데이터베이스 조회
+- **스키마 목록**: `GET /api/schemas` - 모든 스키마 조회
+- **테이블 목록**: `GET /api/tables` - 기본 스키마의 테이블 목록
+- **스키마별 테이블**: `GET /api/schemas/{schema}/tables` - 특정 스키마의 테이블 목록
+- **테이블 스키마**: `GET /api/schema/{table_name}` - 테이블 스키마 정보
+- **데이터 조회**: `GET /api/query/{table_name}` - 테이블 데이터 조회 (페이지네이션, 검색, 정렬 지원)
+- **데이터 스트리밍**: `GET /api/stream/{table_name}` - 대용량 데이터 스트리밍
+
+#### 쿼리 파라미터
+- `page`: 페이지 번호 (기본값: 1)
+- `size`: 페이지 크기 (기본값: 100, 최대: 1000)
+- `sort_by`: 정렬 컬럼
+- `order`: 정렬 순서 (ASC/DESC)
+- `search`: 검색어
+- `search_column`: 검색할 컬럼명
+- `limit`: 스트리밍 시 최대 행 수 (최대: 10000)
+
+### 사용 예시
+
+#### 1. 스키마 목록 조회
+```bash
+curl http://localhost:8004/api/schemas
+```
+
+#### 2. 특정 스키마의 테이블 목록
+```bash
+curl http://localhost:8004/api/schemas/public/tables
+```
+
+#### 3. 테이블 데이터 조회 (페이지네이션)
+```bash
+curl "http://localhost:8004/api/query/users?page=1&size=50"
+```
+
+#### 4. 검색 및 정렬
+```bash
+curl "http://localhost:8004/api/query/users?search=john&search_column=name&sort_by=created_at&order=DESC"
+```
+
+#### 5. 데이터 스트리밍
+```bash
+curl "http://localhost:8004/api/stream/users?limit=5000" > users_data.jsonl
+```
+
+### 환경변수 설정
+
+`.env` 파일에서 다음 설정을 확인하세요:
+
+```bash
+# FastAPI 설정
+API_HOST=0.0.0.0
+API_PORT=8004
+
+# PostgreSQL 연결 설정
+POSTGRES_HOST=10.150.2.150
+POSTGRES_PORT=15432
+POSTGRES_USER=airflow
+POSTGRES_PASSWORD=airflow
+POSTGRES_DB=airflow
+```

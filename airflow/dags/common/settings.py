@@ -109,7 +109,7 @@ class DAGSettings:
                 "primary_key": ["fsym_id"],
                 "sync_mode": "full_sync",
                 "batch_size": 5000,  # 청크 방식에 적합한 배치 크기로 조정
-                "custom_where": "universe_type = 'EQ' AND fsym_id like '%-L'",
+                "custom_where": "fsym_id like '%-L' AND fref_security_type NOT IN ('ETF_UVI','ETF_NAV','NVDR','ALIEN','RIGHT','WARRANT') AND universe_type = 'EQ'",
                 # 청크 방식 설정 (중간 크기 테이블용)
                 "chunk_mode": True,           # 청크 방식 활성화
                 "enable_checkpoint": True,    # 체크포인트 활성화
@@ -490,8 +490,8 @@ class DAGSettings:
         ] 
 
 
-class ConnectionManager:
-    """데이터베이스 연결을 관리하는 클래스"""
+class SettingsConnectionManager:
+    """데이터베이스 연결을 관리하는 클래스 (deprecated - 새로운 connection_manager.py 사용)"""
 
     @staticmethod
     def get_source_connection_id() -> str:
@@ -537,13 +537,77 @@ class ConnectionManager:
             },
             "postgres_default": {
                 "host": os.getenv("POSTGRES_HOST", "postgres"),
-                "port": int(os.getenv("POSTGRES_PORT", "5432")),
+                "port": int(os.getenv("POSTGRES_PORT", "15432")),  # 외부 포트로 변경
                 "database": os.getenv("POSTGRES_DB", "airflow"),
                 "schema": "raw_data",
             },
             "airflow_db": {
                 "host": os.getenv("POSTGRES_HOST", "postgres"),
-                "port": int(os.getenv("POSTGRES_PORT", "5432")),
+                "port": int(os.getenv("POSTGRES_PORT", "15432")),  # 외부 포트로 변경
+                "database": os.getenv("POSTGRES_DB", "airflow"),
+                "schema": "raw_data",
+            },
+        }
+
+        return default_connections.get(conn_id, {})
+
+    @staticmethod
+    def get_connection_info(conn_id: str) -> Dict[str, Any]:
+        """
+        연결 정보를 반환 (Airflow Connection 우선, 환경변수 fallback)
+
+        Args:
+            conn_id: 연결 ID
+
+        Returns:
+            연결 설정 딕셔너리
+        """
+        try:
+            # 1. Airflow Variables에서 연결 정보 가져오기 시도 (우선순위 1)
+            conn_info = Variable.get(f"connection_{conn_id}", deserialize_json=True, default_var={})
+            if conn_info:
+                # logger.info(f"✅ Airflow Variables에서 연결 정보 가져옴: {conn_id}") # logger 모듈이 정의되지 않아 주석 처리
+                return conn_info
+        except Exception as e:
+            # logger.debug(f"Airflow Variables에서 연결 정보 가져오기 실패: {conn_id} - {str(e)}") # logger 모듈이 정의되지 않아 주석 처리
+            pass
+
+        # 2. 환경변수에서 연결 정보 가져오기 시도 (우선순위 2)
+        env_host = os.getenv(f"{conn_id.upper()}_HOST")
+        env_port = os.getenv(f"{conn_id.upper()}_PORT")
+        env_db = os.getenv(f"{conn_id.upper()}_DB")
+        env_user = os.getenv(f"{conn_id.upper()}_USER")
+        env_password = os.getenv(f"{conn_id.upper()}_PASSWORD")
+        
+        if env_host and env_port and env_db:
+            env_conn_info = {
+                "host": env_host,
+                "port": int(env_port),
+                "database": env_db,
+                "user": env_user,
+                "password": env_password,
+                "schema": "public"
+            }
+            # logger.info(f"✅ 환경변수에서 연결 정보 가져옴: {conn_id}") # logger 모듈이 정의되지 않아 주석 처리
+            return env_conn_info
+
+        # 3. 기본 연결 정보 반환 (우선순위 3 - 내부 DB만)
+        default_connections = {
+            "fs2_postgres": {
+                "host": os.getenv("SOURCE_POSTGRES_HOST", "source_postgres"),
+                "port": int(os.getenv("SOURCE_POSTGRES_PORT", "5432")),
+                "database": os.getenv("SOURCE_POSTGRES_DB", "source_db"),
+                "schema": "public",
+            },
+            "postgres_default": {
+                "host": os.getenv("POSTGRES_HOST", "postgres"),
+                "port": int(os.getenv("POSTGRES_PORT", "15432")),  # 외부 포트로 변경
+                "database": os.getenv("POSTGRES_DB", "airflow"),
+                "schema": "raw_data",
+            },
+            "airflow_db": {
+                "host": os.getenv("POSTGRES_HOST", "postgres"),
+                "port": int(os.getenv("POSTGRES_PORT", "15432")),  # 외부 포트로 변경
                 "database": os.getenv("POSTGRES_DB", "airflow"),
                 "schema": "raw_data",
             },

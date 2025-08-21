@@ -290,3 +290,54 @@ logger.info(f"검증 결과: {validation_result}")
 ---
 
 **참고**: 이 DAG들은 프로덕션 환경에서 사용하기 전에 충분한 테스트가 필요합니다. 특히 데이터 크기와 성능 요구사항을 고려하여 설정을 조정하세요.
+
+## 🔗 연결 관리
+
+### 연결 정보 우선순위
+
+프로젝트에서는 다음과 같은 우선순위로 연결 정보를 관리합니다:
+
+1. **Airflow Connection** (최우선) - 외부 데이터베이스 연결
+2. **Airflow Variables** (두 번째) - 설정 정보
+3. **환경변수** (세 번째) - Docker Compose 내부 DB 정보
+4. **기본값** (최후) - 하드코딩된 기본값
+
+### ConnectionManager 사용법
+
+```python
+from common.connection_manager import ConnectionManager
+
+# 연결 테스트
+is_connected = ConnectionManager.test_connection("digitalocean_postgres")
+
+# 연결 정보 가져오기
+conn_info = ConnectionManager.get_connection_info("digitalocean_postgres")
+
+# 모든 연결 상태 요약
+summary = ConnectionManager.get_connection_summary()
+
+# 필수 연결 검증
+required_connections = ["digitalocean_postgres", "postgres_default"]
+validation_results = ConnectionManager.validate_required_connections(required_connections)
+```
+
+### 외부 데이터베이스 연결 설정
+
+외부 데이터베이스(예: DigitalOcean PostgreSQL)는 Airflow UI에서 Connection으로 설정:
+
+1. Airflow UI → Admin → Connections
+2. 새 연결 추가
+3. 연결 ID, 호스트, 포트, 사용자명, 비밀번호 입력
+
+### 내부 데이터베이스 연결
+
+Docker Compose 내부 데이터베이스는 `.env` 파일로 관리:
+
+```bash
+# .env 파일
+POSTGRES_HOST=10.150.2.150
+POSTGRES_USER=airflow
+POSTGRES_PASSWORD=airflow
+POSTGRES_DB=airflow
+POSTGRES_PORT=15432
+```

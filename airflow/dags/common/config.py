@@ -60,7 +60,7 @@ def get_profile_config(
                 "host": "{{ env_var('POSTGRES_HOST', 'postgres') }}",
                 "user": "{{ env_var('POSTGRES_USER', 'airflow') }}",
                 "password": "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}",
-                "port": 5432,
+                "port": "{{ env_var('POSTGRES_PORT', '15432') }}",
                 "dbname": "{{ env_var('POSTGRES_DB', 'airflow') }}",
             },
         ),

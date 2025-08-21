@@ -1,0 +1,5 @@
+[33ma42a686[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m)[m Complete project documentation and tutorial - Add comprehensive README, architecture docs, tutorial, and cursor rules
+[33m31570d3[m Clean up unnecessary files and update documentation
+[33m6bd12e3[m feat: dbt 태그 기반 선택적 실행 시스템 구축 및 DAG 스케줄링 최적화
+[33mc92f13c[m CSV 내보내기 시 컬럼명 불일치 문제 수정 - 스키마에서 실제 컬럼명 가져오기 로직 추가
+[33md8ff96c[m MERGE 작업 오류 수정 - 비기본키 컬럼이 없는 경우 SQL 쿼리 생성 로직 개선

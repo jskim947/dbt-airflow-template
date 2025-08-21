@@ -885,7 +885,7 @@ def copy_data_with_dynamic_sql(table_config: dict, **context) -> dict[str, Any]:
         source_info = source_conn.get_dsn_parameters()
 
         # 간단한 psql \copy 명령어로 데이터 내보내기
-        export_cmd = f"psql -h {source_info.get('host', 'localhost')} -p {source_info.get('port', '5432')} -U {source_info.get('user')} -d {source_info.get('dbname')} -c \"\\copy ({select_sql}) TO '{csv_filename}' WITH CSV HEADER\""
+        export_cmd = f"psql -h {source_info.get('host', 'localhost')} -p {source_info.get('port', '15432')} -U {source_info.get('user')} -d {source_info.get('dbname')} -c \"\\copy ({select_sql}) TO '{csv_filename}' WITH CSV HEADER\""
 
         logger.info(f"Executing export command: {export_cmd}")
         result = subprocess.run(export_cmd, shell=True, capture_output=True, text=True)
@@ -914,10 +914,10 @@ def copy_data_with_dynamic_sql(table_config: dict, **context) -> dict[str, Any]:
         # 간단한 psql \copy 명령어로 데이터 가져오기 (비밀번호 포함)
         if target_password:
             # 비밀번호가 있으면 PGPASSWORD 환경변수 사용
-            import_cmd = f"psql -h {target_info.get('host', 'localhost')} -p {target_info.get('port', '5432')} -U {target_info.get('user')} -d {target_info.get('dbname')} -c \"\\copy {temp_table_full} FROM '{csv_filename}' WITH CSV HEADER\""
+            import_cmd = f"psql -h {target_info.get('host', 'localhost')} -p {target_info.get('port', '15432')} -U {target_info.get('user')} -d {target_info.get('dbname')} -c \"\\copy {temp_table_full} FROM '{csv_filename}' WITH CSV HEADER\""
         else:
             # 비밀번호가 없으면 기본 명령어
-            import_cmd = f"psql -h {target_info.get('host', 'localhost')} -p {target_info.get('port', '5432')} -U {target_info.get('user')} -d {target_info.get('dbname')} -c \"\\copy {temp_table_full} FROM '{csv_filename}' WITH CSV HEADER\""
+            import_cmd = f"psql -h {target_info.get('host', 'localhost')} -p {target_info.get('port', '15432')} -U {target_info.get('user')} -d {target_info.get('dbname')} -c \"\\copy {temp_table_full} FROM '{csv_filename}' WITH CSV HEADER\""
 
         logger.info(f"Executing import command: {import_cmd}")
 

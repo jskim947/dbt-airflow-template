@@ -8,6 +8,21 @@ from .data_copy_engine import DataCopyEngine
 from .database_operations import DatabaseOperations
 from .dbt_integration import DBTIntegration
 from .monitoring import MonitoringManager, ProgressTracker
+from .error_handler import ErrorHandler
+from .connection_manager import ConnectionManager
+from .dag_config_manager import DAGConfigManager
+from .dag_utils import (
+    DAGConfigManager as UtilsDAGConfigManager,
+    ConnectionValidator,
+    TaskFactory,
+    TableManager,
+    DAGDocumentationHelper,
+)
+from .settings import (
+    DAGSettings,
+    MonitoringSettings,
+    BatchSettings,
+)
 
 __all__ = [
     "DBTIntegration",
@@ -15,4 +30,15 @@ __all__ = [
     "DatabaseOperations",
     "MonitoringManager",
     "ProgressTracker",
+    "ErrorHandler",
+    "ConnectionManager",
+    "DAGConfigManager",
+    "UtilsDAGConfigManager",
+    "ConnectionValidator",
+    "TaskFactory",
+    "TableManager",
+    "DAGDocumentationHelper",
+    "DAGSettings",
+    "MonitoringSettings",
+    "BatchSettings",
 ]
