@@ -67,12 +67,15 @@ default_args = {
 }
 
 # DAG 정의
-dag = DAGConfigManager.create_dag(
+dag = DAG(
     dag_id="postgres_multi_table_copy_refactored",
+    default_args=default_args,
     description="Copy data from multiple PostgreSQL tables sequentially and create dbt snapshots (Refactored)",
-    schedule_interval=DAGSettings.get_schedule_intervals()["main_copy"],
-    tags=DAGSettings.DEFAULT_TAGS + ["multi-table", "dbt-snapshot"],
-    max_active_runs=DAGSettings.DEFAULT_DAG_CONFIG["max_active_runs"]
+    schedule_interval="@daily",
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=["postgres", "data-copy", "etl", "refactored", "multi-table", "dbt-snapshot"],
+    max_active_runs=1,
 )
 
 # 연결 ID 설정 (DAGConfigManager에서 가져오기)

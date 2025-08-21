@@ -70,12 +70,15 @@ default_args = {
 }
 
 # DAG 정의
-dag = DAGConfigManager.create_dag(
+dag = DAG(
     dag_id="postgres_edi_data_copy_refactored",
+    default_args=default_args,
     description="Copy EDI data from PostgreSQL tables (Refactored)",
-    schedule_interval=DAGSettings.get_schedule_intervals()["edi_copy"],
-    tags=DAGSettings.DEFAULT_TAGS + ["edi"],
-    max_active_runs=DAGSettings.DEFAULT_DAG_CONFIG["max_active_runs"]
+    schedule_interval="@daily",
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=["postgres", "data-copy", "etl", "refactored", "edi"],
+    max_active_runs=1,
 )
 
 # 연결 ID 설정 (DAGConfigManager에서 가져오기)

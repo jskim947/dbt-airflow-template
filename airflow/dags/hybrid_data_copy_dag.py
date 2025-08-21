@@ -59,9 +59,11 @@ SOURCE_CONN_ID = dag_config.get("source_connection", "digitalocean_postgres")
 # 하이브리드 테이블 설정 (DAGConfigManager에서 가져오기)
 HYBRID_TABLES_CONFIG = DAGConfigManager.get_table_configs("hybrid_data_copy_dag")
 
+# 데이터베이스 작업 객체 초기화
+db_operations = DatabaseOperations(SOURCE_CONN_ID, None)  # 소스만 필요
+
 # 데이터 복사 엔진 초기화
-data_copy_engine = DataCopyEngine()
-db_operations = DatabaseOperations()
+data_copy_engine = DataCopyEngine(db_operations)
 monitoring_manager = MonitoringManager()
 
 

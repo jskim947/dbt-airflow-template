@@ -64,9 +64,11 @@ DBT_PROJECT_PATH = "/opt/airflow/dbt"
 # DigitalOcean PostgreSQL 테이블 설정 (DAGConfigManager에서 가져오기)
 DIGITALOCEAN_TABLES_CONFIG = DAGConfigManager.get_table_configs("digitalocean_data_copy_dag")
 
+# 데이터베이스 작업 객체 초기화
+db_operations = DatabaseOperations(SOURCE_CONN_ID, TARGET_CONN_ID)
+
 # 데이터 복사 엔진 초기화
-data_copy_engine = DataCopyEngine()
-db_operations = DatabaseOperations()
+data_copy_engine = DataCopyEngine(db_operations)
 monitoring_manager = MonitoringManager()
 
 
