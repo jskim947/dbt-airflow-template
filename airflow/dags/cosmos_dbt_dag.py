@@ -9,6 +9,9 @@ from pathlib import Path
 from cosmos import DbtDag, ExecutionConfig, ProfileConfig, ProjectConfig
 from cosmos.profiles import PostgresUserPasswordProfileMapping
 
+# DAGConfigManager import 추가
+from common.dag_config_manager import DAGConfigManager
+
 # dbt project path
 DBT_ROOT_PATH = Path("/opt/airflow/dbt")
 
@@ -29,6 +32,9 @@ profile_config = ProfileConfig(
     ),
 )
 
+# DAG 설정 가져오기
+dag_config = DAGConfigManager.get_dag_config("dbt_processing_dag")
+
 # Cosmos DAG configuration
 cosmos_dbt_dag = DbtDag(
     # dbt/cosmos-specific parameters
@@ -42,10 +48,10 @@ cosmos_dbt_dag = DbtDag(
         "full_refresh": False,
     },
     # normal dag parameters
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2023, 1, 1),
     catchup=False,
     dag_id="cosmos_dbt_dag",
     default_args={"retries": 2},
-    tags=["cosmos", "dbt"],
+    tags=dag_config.get("tags", ["cosmos", "dbt"]),
 )

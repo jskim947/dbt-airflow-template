@@ -3,11 +3,11 @@ postgres_data_copy:  # this should match the profile name in your dbt_project.ym
   outputs:
     dev:
       type: postgres
-      host: "{{ env_var('POSTGRES_HOST', '10.150.2.150') }}"
-      user: "{{ env_var('POSTGRES_USER', 'airflow') }}"
-      password: "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}"
-      port: "{{ env_var('POSTGRES_PORT', 15432) }}"
-      dbname: "{{ env_var('POSTGRES_DB', 'airflow') }}"
+      host: "{{ env_var('POSTGRES_HOST') }}"
+      user: "{{ env_var('POSTGRES_USER') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      port: "{{ env_var('POSTGRES_PORT', 5432) }}"
+      dbname: "{{ env_var('POSTGRES_DB') }}"
       schema: raw_data
       threads: 4
       keepalives_idle: 0

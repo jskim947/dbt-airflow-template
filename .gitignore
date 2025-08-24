@@ -48,3 +48,30 @@ airflow.cfg
 airflow.db
 airflow-webserver.pid
 logs/
+
+# Test files (운영 미사용)
+test_*.py
+*_test.py
+simple_test.py
+worker_test.py
+performance_test.py
+data_copy_engine_chunk.py
+CHUNK_MODE_CONFIG_EXAMPLE.py
+
+# Test results and logs
+performance_results.log
+*.log
+
+# Implementation planning documents
+*_FIX.md
+*_SUMMARY.md
+*_PLAN.md
+*_MIGRATION*.md
+README_*.md
+REFACTORING_*.md
+xmin_*.md
+staging_table_*.md
+
+# Temporary files
+how*
+neline*

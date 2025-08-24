@@ -56,13 +56,15 @@ SOURCE_DB_HOST=localhost
 SOURCE_DB_PORT=5432
 SOURCE_DB_NAME=source_db
 SOURCE_DB_USER=source_user
-SOURCE_DB_PASSWORD=source_password
+# 환경변수 설정
+SOURCE_DB_PASSWORD=your_source_password_here
 
 TARGET_DB_HOST=localhost
 TARGET_DB_PORT=5432
 TARGET_DB_NAME=target_db
 TARGET_DB_USER=target_user
-TARGET_DB_PASSWORD=target_password
+# 데이터베이스 연결 예시
+TARGET_DB_PASSWORD=your_target_password_here
 
 # Airflow 설정
 AIRFLOW_HOME=./airflow
@@ -90,7 +92,7 @@ Connection Type: Postgres
 Host: localhost
 Schema: source_db
 Login: source_user
-Password: source_password
+Password: your_source_password_here
 Port: 5432
 ```
 
@@ -101,7 +103,7 @@ Connection Type: Postgres
 Host: localhost
 Schema: target_db
 Login: target_user
-Password: target_password
+Password: your_target_password_here
 Port: 5432
 ```
 

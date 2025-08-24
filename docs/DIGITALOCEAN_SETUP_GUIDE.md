@@ -51,7 +51,7 @@ PostgreSQL
 # Docker Compose 환경변수 설정 (내부 DB만)
 POSTGRES_HOST=10.150.2.150
 POSTGRES_USER=airflow
-POSTGRES_PASSWORD=airflow
+POSTGRES_PASSWORD=your_secure_password_here
 POSTGRES_DB=airflow
 POSTGRES_PORT=15432
 

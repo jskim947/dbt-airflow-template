@@ -1,20 +1,16 @@
 """
-Simple PostgreSQL Data Copy DAG
-간단한 PostgreSQL 데이터 복사 DAG
-
-이 DAG는 기본적인 데이터 복사 작업을 수행합니다:
-1. 소스 테이블에서 데이터 추출
-2. 타겟 테이블에 데이터 삽입
-3. 간단한 검증
+Simple PostgreSQL data copy DAG
 """
 
 from datetime import datetime, timedelta
-
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.hooks.postgres_hook import PostgresHook
+from airflow.operators.python_operator import PythonOperator
 
-# DAG 기본 설정
+# DAGConfigManager import 추가
+from common.dag_config_manager import DAGConfigManager
+
+# Default arguments
 default_args = {
     "owner": "data_team",
     "depends_on_past": False,
@@ -24,15 +20,18 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
+# DAG 설정 가져오기
+dag_config = DAGConfigManager.get_dag_config("simple_postgres_copy_dag")
+
 # DAG 정의
 dag = DAG(
     "simple_postgres_copy",
     default_args=default_args,
     description="Simple data copy between PostgreSQL databases",
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["postgres", "simple-copy"],
+    tags=dag_config.get("tags", ["postgres", "simple-copy"]),
 )
 
 # 연결 ID 및 테이블 설정

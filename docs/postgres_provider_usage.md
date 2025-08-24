@@ -96,7 +96,8 @@ async def async_query():
 
 ### 환경 변수로 연결 설정
 ```bash
-export AIRFLOW_CONN_MY_POSTGRES_CONN='postgresql://user:password@host:5432/dbname'
+# 연결 문자열 예시 (실제 값으로 교체 필요)
+export AIRFLOW_CONN_MY_POSTGRES_CONN='postgresql://username:password@hostname:5432/database_name'
 ```
 
 ## 고급 기능

@@ -87,16 +87,16 @@ default_args = {
 }
 
 # 연결 ID 설정 (DAGConfigManager에서 가져오기)
-dag_config = DAGConfigManager.get_dag_config("postgres_multi_table_copy_refactored")
+dag_config = DAGConfigManager.get_dag_config("postgres_multi_table_copy_refactored2")
 SOURCE_CONN_ID = dag_config.get("source_connection", "fs2_postgres")
 TARGET_CONN_ID = dag_config.get("target_connection", "postgres_default")
 
 # DAG 정의
 dag = DAG(
-    dag_id="postgres_multi_table_copy_refactored",
+    dag_id="postgres_multi_table_copy_refactored2",
     default_args=default_args,
     description=dag_config.get("description", "Copy data from multiple PostgreSQL tables sequentially and create dbt snapshots (Refactored)"),
-    schedule_interval=DAGConfigManager.get_dag_schedule("postgres_multi_table_copy_refactored"),
+    schedule_interval=DAGConfigManager.get_dag_schedule("postgres_multi_table_copy_refactored2"),
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=dag_config.get("tags", ["postgres", "data-copy", "etl", "refactored", "multi-table", "dbt-snapshot"]),
@@ -107,7 +107,7 @@ dag = DAG(
 DBT_PROJECT_PATH = "/opt/airflow/dbt"
 
 # 테이블 설정 (DAGConfigManager에서 가져오기)
-TABLES_CONFIG = DAGConfigManager.get_table_configs("postgres_multi_table_copy_refactored")
+TABLES_CONFIG = DAGConfigManager.get_table_configs("postgres_multi_table_copy_refactored2")
 
 # 설정이 비어있거나 잘못된 경우 기본값 사용
 if not TABLES_CONFIG or not isinstance(TABLES_CONFIG, list):

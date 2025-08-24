@@ -11,12 +11,15 @@ class SchemaInfo(BaseModel):
     """스키마 정보 모델"""
     name: str = Field(..., description="스키마명")
     table_count: int = Field(..., description="테이블 개수")
+    view_count: int = Field(..., description="뷰 개수")
+    matview_count: int = Field(..., description="Materialized View 개수")
 
 
 class TableInfo(BaseModel):
     """테이블 정보 모델"""
     name: str = Field(..., description="테이블명")
     columns: int = Field(..., description="컬럼 개수")
+    object_type: str = Field(..., description="객체 타입 (table, view, matview)")
 
 
 class ColumnInfo(BaseModel):

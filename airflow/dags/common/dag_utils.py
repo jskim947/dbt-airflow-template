@@ -250,7 +250,19 @@ class TaskFactory:
 
         for i, table_config in enumerate(table_configs):
             # 테이블명에서 특수문자 제거하여 태스크 ID 생성
-            table_name_clean = table_config['source'].replace('.', '_').replace('-', '_')
+            # source_table, source, table_name 순서로 확인
+            if 'source_table' in table_config:
+                table_name = table_config['source_table']
+            elif 'source' in table_config:
+                table_name = table_config['source']
+            elif 'table_name' in table_config:
+                table_name = table_config['table_name']
+            else:
+                # fallback: 인덱스 사용
+                table_name = f"table_{i}"
+                logger.warning(f"테이블명을 찾을 수 없어 인덱스 사용: {table_config}")
+            
+            table_name_clean = table_name.replace('.', '_').replace('-', '_')
             task_id = f"{task_prefix}_{i}_{table_name_clean}"
 
             task = PythonOperator(
@@ -287,8 +299,19 @@ class TaskFactory:
 
         for i, table_config in enumerate(table_configs):
             # EDI 테이블용 태스크 ID 생성
+            # source_table, source, table_name 순서로 확인하여 테이블명 도출
+            if 'source_table' in table_config:
+                table_name = table_config['source_table']
+            elif 'source' in table_config:
+                table_name = table_config['source']
+            elif 'table_name' in table_config:
+                table_name = table_config['table_name']
+            else:
+                table_name = f"table_{i}"
+                logger.warning(f"EDI 테이블명을 찾을 수 없어 인덱스 사용: {table_config}")
+
             table_name_clean = (
-                table_config['source']
+                table_name
                 .replace('.', '_')
                 .replace('m23_', '')
                 .replace('-', '_')

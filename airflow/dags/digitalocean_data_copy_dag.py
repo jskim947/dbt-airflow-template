@@ -41,22 +41,22 @@ default_args = {
     "email": ["admin@example.com"],
 }
 
-# DAG 정의
-dag = DAG(
-    "digitalocean_postgres_data_copy",
-    default_args=default_args,
-    description="Copy data from DigitalOcean PostgreSQL to local PostgreSQL with dbt snapshots",
-    schedule_interval="@daily",
-    start_date=datetime(2024, 1, 1),
-    catchup=False,
-    tags=["postgres", "data-copy", "etl", "digitalocean", "dbt-snapshot"],
-    max_active_runs=1,
-)
-
 # 연결 ID 설정 (DAGConfigManager에서 가져오기)
 dag_config = DAGConfigManager.get_dag_config("digitalocean_data_copy_dag")
 SOURCE_CONN_ID = dag_config.get("source_connection", "digitalocean_postgres")
 TARGET_CONN_ID = dag_config.get("target_connection", "postgres_default")
+
+# DAG 정의
+dag = DAG(
+    "digitalocean_postgres_data_copy",
+    default_args=default_args,
+    description=dag_config.get("description", "Copy data from DigitalOcean PostgreSQL to local PostgreSQL with dbt snapshots"),
+    schedule_interval=DAGConfigManager.get_dag_schedule("digitalocean_data_copy_dag"),
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=dag_config.get("tags", ["postgres", "data-copy", "etl", "digitalocean", "dbt-snapshot"]),
+    max_active_runs=1,
+)
 
 # dbt 프로젝트 경로 설정
 DBT_PROJECT_PATH = "/opt/airflow/dbt"
@@ -202,8 +202,20 @@ validate_connections_task = PythonOperator(
 # 테이블별 복사 태스크 생성
 copy_tasks = []
 for i, table_config in enumerate(DIGITALOCEAN_TABLES_CONFIG):
+    # source_table, source, table_name 순서로 확인
+    if 'source_table' in table_config:
+        table_name = table_config['source_table']
+    elif 'source' in table_config:
+        table_name = table_config['source']
+    elif 'table_name' in table_config:
+        table_name = table_config['table_name']
+    else:
+        # fallback: 인덱스 사용
+        table_name = f"table_{i}"
+        logger.warning(f"테이블명을 찾을 수 없어 인덱스 사용: {table_config}")
+    
     task = PythonOperator(
-        task_id=f"copy_table_{i}_{table_config['source'].replace('.', '_').replace('-', '_')}",
+        task_id=f"copy_table_{i}_{table_name.replace('.', '_').replace('-', '_')}",
         python_callable=copy_table_data,
         op_kwargs={"table_config": table_config},
         dag=dag,

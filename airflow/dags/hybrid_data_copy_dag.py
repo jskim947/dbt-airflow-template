@@ -40,21 +40,21 @@ default_args = {
     "email": ["admin@example.com"],
 }
 
+# 연결 ID 설정 (DAGConfigManager에서 가져오기)
+dag_config = DAGConfigManager.get_dag_config("hybrid_data_copy_dag")
+SOURCE_CONN_ID = dag_config.get("source_connection", "digitalocean_postgres")
+
 # DAG 정의
 dag = DAG(
     "hybrid_data_copy_dag",
     default_args=default_args,
-    description="Hybrid data copy from DigitalOcean PostgreSQL to multiple target databases",
-    schedule_interval="@daily",
+    description=dag_config.get("description", "Hybrid data copy from DigitalOcean PostgreSQL to multiple target databases"),
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["postgres", "data-copy", "etl", "hybrid", "multi-target", "digitalocean"],
+    tags=dag_config.get("tags", ["postgres", "data-copy", "etl", "hybrid", "multi-target", "digitalocean"]),
     max_active_runs=1,
 )
-
-# 연결 ID 설정 (DAGConfigManager에서 가져오기)
-dag_config = DAGConfigManager.get_dag_config("hybrid_data_copy_dag")
-SOURCE_CONN_ID = dag_config.get("source_connection", "digitalocean_postgres")
 
 # 하이브리드 테이블 설정 (DAGConfigManager에서 가져오기)
 HYBRID_TABLES_CONFIG = DAGConfigManager.get_table_configs("hybrid_data_copy_dag")
@@ -285,8 +285,20 @@ validate_connections_task = PythonOperator(
 # 테이블별 복사 태스크 생성
 copy_tasks = []
 for i, table_config in enumerate(HYBRID_TABLES_CONFIG):
+    # source_table, source, table_name 순서로 확인
+    if 'source_table' in table_config:
+        table_name = table_config['source_table']
+    elif 'source' in table_config:
+        table_name = table_config['source']
+    elif 'table_name' in table_config:
+        table_name = table_config['table_name']
+    else:
+        # fallback: 인덱스 사용
+        table_name = f"table_{i}"
+        logger.warning(f"테이블명을 찾을 수 없어 인덱스 사용: {table_config}")
+    
     task = PythonOperator(
-        task_id=f"copy_table_{i}_{table_config['source'].replace('.', '_').replace('-', '_')}",
+        task_id=f"copy_table_{i}_{table_name.replace('.', '_').replace('-', '_')}",
         python_callable=copy_table_to_targets,
         op_kwargs={"table_config": table_config},
         dag=dag,

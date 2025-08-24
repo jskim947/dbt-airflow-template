@@ -337,7 +337,8 @@ Docker Compose 내부 데이터베이스는 `.env` 파일로 관리:
 # .env 파일
 POSTGRES_HOST=10.150.2.150
 POSTGRES_USER=airflow
-POSTGRES_PASSWORD=airflow
+# 환경변수 설정 (실제 값으로 교체 필요)
+POSTGRES_PASSWORD=your_secure_password_here
 POSTGRES_DB=airflow
 POSTGRES_PORT=15432
 ```

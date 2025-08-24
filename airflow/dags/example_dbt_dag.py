@@ -8,6 +8,9 @@ from airflow import DAG  # type: ignore[attr-defined]
 from airflow.operators.bash import BashOperator
 from airflow.utils.dates import days_ago
 
+# DAGConfigManager import 추가
+from common.dag_config_manager import DAGConfigManager
+
 # Default arguments for DAG
 default_args = {
     "owner": "airflow",
@@ -18,6 +21,9 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
+# DAG 설정 가져오기
+dag_config = DAGConfigManager.get_dag_config("dbt_processing_dag")
+
 # Base command for dbt
 DBT_DIR = "/opt/airflow/dbt"
 DBT_CMD = f"cd {DBT_DIR} && dbt"
@@ -26,10 +32,10 @@ with DAG(
     "example_dbt_dag",
     default_args=default_args,
     description="An example DAG for running dbt commands",
-    schedule_interval=timedelta(days=1),
+    schedule_interval=dag_config.get("schedule_interval", timedelta(days=1)),  # 설정에서 가져오기
     start_date=days_ago(1),
     catchup=False,
-    tags=["example", "dbt"],
+    tags=dag_config.get("tags", ["example", "dbt"]),
 ) as dag:
     # Debug information about environment
     debug_env = BashOperator(

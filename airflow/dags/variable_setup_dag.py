@@ -27,12 +27,26 @@ DAG_CONFIGS = {
     "postgres_multi_table_copy_refactored": {
         "dag_id": "postgres_multi_table_copy_refactored",
         "description": "PostgreSQL Multi-Table Data Copy DAG (Refactored)",
-        "schedule_interval": "@daily",
+        "schedule_interval": "@am1am7",
         "enabled": True,
         "tags": ["postgres", "data-copy", "etl", "refactored"],
         "source_connection": "fs2_postgres",
         "target_connection": "postgres_default",
         "tables": ["인포맥스종목마스터", "ff_v3_ff_sec_entity", "sym_v1_sym_ticker_exchange", "sym_v1_sym_coverage"],
+        "execution_status": "active",
+        "last_successful_run": "2025-08-21T01:08:45.430516+00:00",
+        "avg_execution_time_minutes": 45,
+        "success_rate_percent": 95.0
+    },
+    "postgres_multi_table_copy_refactored2": {
+        "dag_id": "postgres_multi_table_copy_refactored2",
+        "description": "PostgreSQL Multi-Table Data Copy DAG (Refactored)",
+        "schedule_interval": "@am9",
+        "enabled": True,
+        "tags": ["postgres", "data-copy", "etl", "refactored"],
+        "source_connection": "digitalocean_postgres",
+        "target_connection": "postgres_default",
+        "tables": ["scrap.stock_info","scrap.etf_info"],
         "execution_status": "active",
         "last_successful_run": "2025-08-21T01:08:45.430516+00:00",
         "avg_execution_time_minutes": 45,
@@ -96,13 +110,7 @@ DAG_CONFIGS = {
     }
 }
 
-# Connection configurations (연결 설정)
-CONNECTION_CONFIGS = {
-    "source_postgres": "fs2_postgres",
-    "target_postgres": "postgres_default",
-    "airflow_db": "airflow_db",
-    "digitalocean_postgres": "digitalocean_postgres"
-}
+
 
 # Table configurations (테이블별 설정 - copy_method와 sync_mode 통합)
 TABLE_CONFIGS = {
@@ -149,7 +157,7 @@ TABLE_CONFIGS = {
         "primary_key": ["fsym_id"],
         "sync_mode": "full_sync",
         "batch_size": 10000,
-        "custom_where": "SPLIT_PART(ticker_exchange, '-', 2) IN ('AMS','BRU','FRA','HKG','HSTC','JAS','JKT','KRX','LIS','LON','NAS','NYS','PAR','ROCO','SES','SHE','SHG','STC','TAI','TKS','TSE')",
+        "custom_where": "SPLIT_PART(ticker_exchange, '-', 2) IN ('BRU','TSE','SEC','SHE','SHG','SSC','BER','DUS','ETR','FRA','HAM','HAN','MUN','STU','TGAT','XEX','PAR','LIS','LON','HKG','HSC','SZSC','JKT','MIL','FKA','JAS','NGO','OSE','SAP','TKS','KRX','AMS','SES','ROCO','TAI','ADF','ASE','BATS','BATY','BOS','CBO','CHI','CIS','EDGA','EDGX','EPRL','IEXG','ISE','LTSE','MEMX','NAS','NYS','PHL','PSE','HSTC','STC')",
         "chunk_mode": True,
         "enable_checkpoint": True,
         "max_retries": 3,
@@ -224,32 +232,86 @@ TABLE_CONFIGS = {
         "enable_checkpoint": True,
         "max_retries": 3,
         "description": "DigitalOcean 주문 테이블 - 증분 동기화"
-    }
-}
-
-# EDI table configurations (EDI 테이블 설정)
-EDI_TABLE_CONFIGS = [
-    {
-        "source": "m23.edi_690",
-        "target": "raw_data.edi_690",
+    },
+    "edi_690_edi": {
+        "dag_id": "postgres_multi_table_copy_refactored_edi",
+        "source_connection": "fs2_postgres",
+        "source_schema": "m23",
+        "source_table": "m23.edi_690",
+        "target_connection": "postgres_default",
+        "target_schema": "raw_data",
+        "target_table": "raw_data.edi_690",
         "primary_key": ["eventcd", "eventid", "optionid", "serialid", "scexhid", "sedolid"],
         "sync_mode": "incremental_sync",
         "batch_size": 10000,
         "incremental_field": "changed",
         "incremental_field_type": "yyyymmdd",
         "custom_where": "changed >= '20250812'",
-        "where_clause": "changed >= '20250812'",
         "chunk_mode": True,
         "enable_checkpoint": True,
         "max_retries": 3,
-        "description": "EDI 690 이벤트 데이터 - 청크 방식으로 안전하게 처리"
+        "description": "EDI 690 이벤트 데이터 - EDI DAG용"
+    },
+    "edi_691_edi": {
+        "dag_id": "postgres_multi_table_copy_refactored_edi",
+        "source_connection": "fs2_postgres",
+        "source_schema": "m23",
+        "source_table": "m23.edi_691",
+        "target_connection": "postgres_default",
+        "target_schema": "raw_data",
+        "target_table": "raw_data.edi_691",
+        "primary_key": ["eventcd", "eventid", "optionid", "serialid", "scexhid", "sedolid"],
+        "sync_mode": "incremental_sync",
+        "batch_size": 10000,
+        "incremental_field": "changed",
+        "incremental_field_type": "yyyymmdd",
+        "custom_where": "changed >= '20250812'",
+        "chunk_mode": True,
+        "enable_checkpoint": True,
+        "max_retries": 3,
+        "description": "EDI 691 이벤트 데이터 - EDI DAG용"
+    },
+    "scrap.stock_info": {
+        "dag_id": "postgres_multi_table_copy_refactored2",
+        "source_connection": "digitalocean_postgres",
+        "source_schema": "scrap",
+        "source_table": "scrap.stock_info",
+        "target_connection": "postgres_default",
+        "target_schema": "raw_data",
+        "target_table": "raw_data.scrap_stock_info",
+        "primary_key": ["id"],
+        "sync_mode": "full_sync",
+        "batch_size": 10000,
+        "chunk_mode": True,
+        "enable_checkpoint": True,
+        "max_retries": 3,
+        "description": "Scrap 종목 정보 - 청크 방식으로 안전하게 처리"
+    },
+    "scrap.etf_info": {
+        "dag_id": "postgres_multi_table_copy_refactored2",
+        "source_connection": "digitalocean_postgres",
+        "source_schema": "scrap",
+        "source_table": "scrap.etf_info",
+        "target_connection": "postgres_default",
+        "target_schema": "raw_data",
+        "target_table": "raw_data.scrap_etf_info",
+        "primary_key": ["id"],
+        "sync_mode": "full_sync",
+        "batch_size": 10000,
+        "chunk_mode": True,
+        "enable_checkpoint": True,
+        "max_retries": 3,
+        "description": "Scrap ETF 정보 - 청크 방식으로 안전하게 처리"
     }
-]
+}
+
+
 
 # Schedule configurations (스케줄 설정)
 SCHEDULE_CONFIGS = {
-    "main_copy": "0 3,16 * * *",  # 매일 오전 3시, 오후 4시
-    "edi_copy": "0 9 * * *",       # 매일 9시
+    "am1am7": "0 16,22 * * *",  # 매일 오전 1시, 오전 7시 (KST)
+    "pm18": "0 9 * * *",          # 매일 오후 18시 (KST)
+    "am9": "0 0 * * *",          # 매일 오전 9시 (KST)
     "daily": "0 2 * * *",          # 매일 오전 2시
     "hourly": "0 * * * *",         # 매시간
     "manual": "@once",             # 수동 실행
@@ -309,7 +371,7 @@ EXECUTION_MONITORING_CONFIGS = {
         "memory_usage_mb": 2048
     },
     "notification_channels": {
-        "email": ["admin@example.com", "data-team@example.com"],
+        "email": ["admin@yourcompany.com", "data-team@yourcompany.com"],
         "slack": "#data-pipeline-alerts",
         "webhook": "https://hooks.slack.com/services/..."
     },
@@ -462,7 +524,7 @@ DEFAULT_DAG_CONFIG = {
     "email_on_retry": False,
     "retries": 2,
     "retry_delay_minutes": 5,
-    "email": ["admin@example.com"],
+    "email": ["admin@yourcompany.com"],
     "start_date": "2024-01-01",
     "catchup": False,
     "max_active_runs": 1,
@@ -473,11 +535,7 @@ DEFAULT_DAG_CONFIG = {
 DEFAULT_TAGS = ["postgres", "data-copy", "etl", "refactored"]
 
 
-def setup_connection_variables(**context):
-    """Set up connection configuration variables"""
-    Variable.set("connection_configs", json.dumps(CONNECTION_CONFIGS, indent=2))
-    print(f"Set connection_configs variable with {len(CONNECTION_CONFIGS)} connections")
-    return f"Successfully set {len(CONNECTION_CONFIGS)} connection configurations"
+
 
 
 def setup_table_variables(**context):
@@ -487,11 +545,7 @@ def setup_table_variables(**context):
     return f"Successfully set {len(TABLE_CONFIGS)} table configurations"
 
 
-def setup_edi_table_variables(**context):
-    """Set up EDI table configuration variables"""
-    Variable.set("edi_table_configs", json.dumps(EDI_TABLE_CONFIGS, indent=2))
-    print(f"Set edi_table_configs variable with {len(EDI_TABLE_CONFIGS)} EDI tables")
-    return f"Successfully set {len(EDI_TABLE_CONFIGS)} EDI table configurations"
+
 
 
 def setup_schedule_variables(**context):
@@ -593,9 +647,7 @@ def verify_variables(**context):
     try:
         # 모든 설정 변수 검증
         variables_to_check = [
-            "connection_configs",
             "table_configs", 
-            "edi_table_configs",
             "schedule_configs",
             "environment_configs",
             "sync_mode_configs",
@@ -657,21 +709,9 @@ def verify_variables(**context):
 dag = DAG(**dag_config)
 
 # Create tasks
-setup_connections_task = PythonOperator(
-    task_id="setup_connection_variables",
-    python_callable=setup_connection_variables,
-    dag=dag,
-)
-
 setup_tables_task = PythonOperator(
     task_id="setup_table_variables",
     python_callable=setup_table_variables,
-    dag=dag,
-)
-
-setup_edi_tables_task = PythonOperator(
-    task_id="setup_edi_table_variables",
-    python_callable=setup_edi_table_variables,
     dag=dag,
 )
 
@@ -749,9 +789,7 @@ verify_task = PythonOperator(
 
 # Set task dependencies (순차적 실행)
 (
-    setup_connections_task
-    >> setup_tables_task
-    >> setup_edi_tables_task
+    setup_tables_task
     >> setup_schedules_task
     >> setup_environments_task
     >> setup_sync_methods_task

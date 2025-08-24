@@ -45,10 +45,10 @@ pip show apache-airflow-providers-postgres
 ### 2. 환경 변수로 연결 설정 (선택사항)
 ```bash
 # 소스 연결
-export AIRFLOW_CONN_SOURCE_POSTGRES_CONN='postgresql://user:password@source_host:5432/source_db'
+export AIRFLOW_CONN_SOURCE_POSTGRES_CONN='postgresql://username:password@hostname:5432/database_name'
 
 # 타겟 연결
-export AIRFLOW_CONN_TARGET_POSTGRES_CONN='postgresql://user:password@target_host:5432/target_db'
+export AIRFLOW_CONN_TARGET_POSTGRES_CONN='postgresql://username:password@hostname:5432/database_name'
 ```
 
 ## 테이블 준비

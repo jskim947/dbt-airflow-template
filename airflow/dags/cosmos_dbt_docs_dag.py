@@ -9,6 +9,9 @@ from pathlib import Path
 from cosmos import DbtDag, ExecutionConfig, ProfileConfig, ProjectConfig
 from cosmos.profiles import PostgresUserPasswordProfileMapping
 
+# DAGConfigManager import 추가
+from common.dag_config_manager import DAGConfigManager
+
 # dbt project path
 DBT_ROOT_PATH = Path("/opt/airflow/dbt")
 
@@ -17,17 +20,20 @@ profile_config = ProfileConfig(
     profile_name="example_dbt",
     target_name="dev",
     profile_mapping=PostgresUserPasswordProfileMapping(
-        conn_id="airflow_db",
+        conn_id="postgres_default",
         profile_args={
-            "schema": "example_dbt",
-            "host": "{{ env_var('POSTGRES_HOST', 'postgres') }}",
-            "user": "{{ env_var('POSTGRES_USER', 'airflow') }}",
-            "password": "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}",
-            "port": 15432,  # 외부 포트로 변경
-            "dbname": "{{ env_var('POSTGRES_DB', 'airflow') }}",
-        },
+            "host": "{{ conn.host }}",
+            "user": "{{ conn.login }}",
+            "password": "{{ conn.password }}",  # 하드코딩된 기본값 제거
+            "port": "{{ conn.port }}",
+            "dbname": "{{ conn.schema }}",
+            "schema": "raw_data"
+        }
     ),
 )
+
+# DAG 설정 가져오기
+dag_config = DAGConfigManager.get_dag_config("dbt_processing_dag")
 
 # dbt docs generation DAG
 dbt_docs_dag = DbtDag(
@@ -40,10 +46,10 @@ dbt_docs_dag = DbtDag(
         "install_deps": True,
         "full_refresh": False,
     },
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2023, 1, 1),
     catchup=False,
     dag_id="cosmos_dbt_docs_dag",
     default_args={"retries": 2},
-    tags=["cosmos", "dbt", "docs"],
+    tags=dag_config.get("tags", ["cosmos", "dbt", "docs"]),
 )

@@ -72,19 +72,32 @@ class DatabaseOperations:
 
         return results
 
-    def get_table_schema(self, table_name: str) -> dict[str, Any]:
+    def get_table_schema(self, table_name: str, preferred_schema: str | None = None) -> dict[str, Any]:
         """
         테이블의 스키마 정보를 조회
 
         Args:
-            table_name: 테이블명 (schema.table 형식)
+            table_name: 테이블명 (schema.table 형식 또는 테이블명만)
+            preferred_schema: 우선적으로 사용할 스키마 이름 (선택사항)
 
         Returns:
             테이블 스키마 정보 딕셔너리
         """
         try:
             source_hook = self.get_source_hook()
-            schema, table = table_name.split(".")
+            
+            # schema.table 형식인지 확인
+            if "." in table_name:
+                schema, table = table_name.split(".")
+            else:
+                # preferred_schema가 있으면 사용, 없으면 기본 스키마 사용
+                if preferred_schema:
+                    schema = preferred_schema
+                    logger.info(f"preferred_schema '{schema}' 사용: {table_name}")
+                else:
+                    schema = "public"
+                    logger.info(f"테이블명에 스키마가 없어 기본 스키마 '{schema}' 사용: {table_name}")
+                table = table_name
             
             # 컬럼 정보 조회
             columns_sql = """
@@ -102,8 +115,43 @@ class DatabaseOperations:
             
             columns = source_hook.get_records(columns_sql, parameters=(schema, table))
             
+            if not columns:
+                logger.warning(f"테이블 {schema}.{table}에서 컬럼을 찾을 수 없습니다. 다른 스키마에서 찾아보겠습니다.")
+                
+                # 데이터베이스에서 실제로 존재하는 모든 스키마를 동적으로 조회
+                schemas_sql = """
+                    SELECT DISTINCT schema_name 
+                    FROM information_schema.schemata 
+                    WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                    ORDER BY schema_name
+                """
+                available_schemas = source_hook.get_records(schemas_sql)
+                
+                if available_schemas:
+                    schema_names = [row[0] for row in available_schemas]
+                    logger.info(f"사용 가능한 스키마들: {schema_names}")
+                    
+                    # preferred_schema를 우선적으로 확인하고, 그 다음 지정된 스키마, 마지막으로 다른 스키마들
+                    priority_schemas = []
+                    if preferred_schema and preferred_schema != schema:
+                        priority_schemas.append(preferred_schema)
+                    priority_schemas.append(schema)
+                    priority_schemas.extend([s for s in schema_names if s not in priority_schemas])
+                    
+                    for search_schema in priority_schemas:
+                        columns = source_hook.get_records(columns_sql, parameters=(search_schema, table))
+                        if columns:
+                            schema = search_schema
+                            logger.info(f"테이블을 스키마 '{schema}'에서 찾았습니다: {table}")
+                            break
+                else:
+                    logger.warning("사용 가능한 스키마를 찾을 수 없습니다.")
+            
+            if not columns:
+                raise Exception(f"테이블 {table}을 어떤 스키마에서도 찾을 수 없습니다")
+            
             schema_info = {
-                "table_name": table_name,
+                "table_name": f"{schema}.{table}",
                 "schema": schema,
                 "table": table,
                 "columns": [
@@ -119,7 +167,7 @@ class DatabaseOperations:
                 ]
             }
             
-            logger.info(f"Retrieved schema for table {table_name}: {len(schema_info['columns'])} columns")
+            logger.info(f"Retrieved schema for table {schema_info['table_name']}: {len(schema_info['columns'])} columns")
             return schema_info
             
         except Exception as e:
@@ -143,7 +191,13 @@ class DatabaseOperations:
             target_hook = self.get_target_hook()
 
             # 타겟 스키마와 테이블명 분리
-            target_schema, target_table_name = target_table.split(".")
+            if "." in target_table:
+                target_schema, target_table_name = target_table.split(".")
+            else:
+                # 기본 스키마 사용 (raw_data)
+                target_schema = "raw_data"
+                target_table_name = target_table
+                logger.info(f"타겟 테이블명에 스키마가 없어 기본 스키마 '{target_schema}' 사용: {target_table}")
 
             # 1단계: 스키마가 존재하는지 확인하고 없으면 생성
             schema_exists_sql = f"""
@@ -234,10 +288,30 @@ class DatabaseOperations:
                 else:
                     pg_type = "TEXT"  # 기본값
 
+                # 기본값 안전하게 처리 (시퀀스 참조 제거)
+                default_clause = ""
+                if col_default:
+                    # 시퀀스 참조나 복잡한 기본값은 제거하고 간단한 값만 사용
+                    if "nextval" in str(col_default).lower() or "::" in str(col_default):
+                        logger.info(f"컬럼 {col_name}의 복잡한 기본값 '{col_default}' 제거됨")
+                        default_clause = ""
+                    elif col_default.lower() in ["current_timestamp", "now()"]:
+                        default_clause = f" DEFAULT {col_default}"
+                    elif col_default.lower() == "true":
+                        default_clause = " DEFAULT TRUE"
+                    elif col_default.lower() == "false":
+                        default_clause = " DEFAULT FALSE"
+                    elif col_default.isdigit() or col_default.replace(".", "").replace("-", "").isdigit():
+                        default_clause = f" DEFAULT {col_default}"
+                    elif col_default.startswith("'") and col_default.endswith("'"):
+                        default_clause = f" DEFAULT {col_default}"
+                    else:
+                        logger.info(f"컬럼 {col_name}의 기본값 '{col_default}' 제거됨 (안전하지 않음)")
+                        default_clause = ""
+
                 nullable_clause = "NOT NULL" if not is_nullable else ""
-                default = f" DEFAULT {col_default}" if col_default else ""
                 column_definitions.append(
-                    f"{col_name} {pg_type} {nullable_clause}{default}"
+                    f"{col_name} {pg_type} {nullable_clause}{default_clause}"
                 )
 
             create_sql += ", ".join(column_definitions) + ")"
@@ -273,11 +347,37 @@ class DatabaseOperations:
             생성 결과 메시지
         """
         try:
-            # 소스 테이블 스키마 조회
-            source_schema = self.get_table_schema(table_config["source"])
+            # 소스 테이블 스키마 조회 (source_table, source 순서로 확인)
+            source_table = None
+            if "source_table" in table_config:
+                source_table = table_config["source_table"]
+            elif "source" in table_config:
+                source_table = table_config["source"]
+            else:
+                raise ValueError("테이블 설정에 source_table 또는 source가 없습니다")
             
-            # 타겟 테이블 생성
-            return self.create_table_if_not_exists(table_config["target"], source_schema)
+            # source_schema가 설정되어 있으면 우선 사용
+            source_schema_name = None
+            if "source_schema" in table_config:
+                source_schema_name = table_config["source_schema"]
+                logger.info(f"설정에서 source_schema를 찾았습니다: {source_schema_name}")
+            
+            # get_table_schema에 source_schema 정보 전달
+            if source_schema_name:
+                source_schema = self.get_table_schema(source_table, preferred_schema=source_schema_name)
+            else:
+                source_schema = self.get_table_schema(source_table)
+            
+            # 타겟 테이블 생성 (target_table, target 순서로 확인)
+            target_table = None
+            if "target_table" in table_config:
+                target_table = table_config["target_table"]
+            elif "target" in table_config:
+                target_table = table_config["target"]
+            else:
+                raise ValueError("테이블 설정에 target_table 또는 target이 없습니다")
+            
+            return self.create_table_if_not_exists(target_table, source_schema)
             
         except Exception as e:
             error_msg = f"Failed to ensure target table exists: {e}"

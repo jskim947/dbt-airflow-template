@@ -61,7 +61,19 @@ class DAGConfigManager:
         """
         try:
             table_configs = json.loads(Variable.get("table_configs", "{}"))
-            return table_configs
+            
+            # 특정 DAG에 해당하는 테이블만 필터링
+            filtered_configs = []
+            for table_name, config in table_configs.items():
+                if config.get("dag_id") == dag_id:
+                    # 테이블명을 키로 추가하고 설정을 복사
+                    config_copy = config.copy()
+                    config_copy["table_name"] = table_name
+                    filtered_configs.append(config_copy)
+            
+            logger.info(f"DAG {dag_id}에 해당하는 테이블 {len(filtered_configs)}개 필터링 완료")
+            return filtered_configs
+            
         except Exception as e:
             logger.warning(f"테이블 설정을 가져올 수 없음: {dag_id} - {str(e)}")
             return []
@@ -214,7 +226,70 @@ class DAGConfigManager:
             스케줄 문자열
         """
         dag_config = DAGConfigManager.get_dag_config(dag_id)
-        return dag_config.get("schedule_interval", "@daily")
+        raw_schedule = dag_config.get("schedule_interval", "@daily")
+        return DAGConfigManager.resolve_schedule_interval(raw_schedule)
+
+    @staticmethod
+    def resolve_schedule_interval(schedule: str) -> str:
+        """
+        스케줄 문자열을 유효한 cron 또는 Airflow preset으로 변환
+
+        - 표준 Airflow preset(@daily 등)은 그대로 반환
+        - '@<alias>' 또는 '<alias>' 형태의 커스텀 키는 Variables.schedule_configs 또는 기본 매핑에서 cron으로 변환
+        - 이미 cron 형태(공백 포함 4~6개 구분자)는 그대로 반환
+
+        Args:
+            schedule: 스케줄 문자열
+
+        Returns:
+            유효한 cron 또는 preset 문자열
+        """
+        try:
+            if not isinstance(schedule, str) or schedule.strip() == "":
+                return "@daily"
+
+            schedule_str = schedule.strip()
+
+            # 표준 프리셋은 그대로 사용
+            standard_presets = {
+                "@once",
+                "@hourly",
+                "@daily",
+                "@weekly",
+                "@monthly",
+                "@yearly",
+                "@annually",
+                "@midnight",
+            }
+            if schedule_str in standard_presets:
+                return schedule_str
+
+            # 이미 cron 형태인지 간단히 판별(공백 구분 5~7 컬럼)
+            parts = schedule_str.split()
+            if 5 <= len(parts) <= 7:
+                return schedule_str
+
+            # 커스텀 별칭 처리: '@alias' 또는 'alias'
+            alias = schedule_str[1:] if schedule_str.startswith("@") else schedule_str
+
+            # Variables에서 스케줄 매핑 조회
+            try:
+                from airflow.models import Variable  # 지역 import로 파싱 시 오류 방지
+                schedule_configs = json.loads(Variable.get("schedule_configs", "{}"))
+            except Exception:
+                schedule_configs = {}
+
+            # Variables에 없으면 미해결로 간주
+            resolved = schedule_configs.get(alias)
+            if resolved:
+                return resolved
+
+            # 마지막으로 안전값 반환
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Unknown schedule alias '{alias}'. Falling back to @daily. Define it in Airflow Variable 'schedule_configs'.")
+            return "@daily"
+        except Exception:
+            return "@daily"
 
     @staticmethod
     def update_dag_execution_status(dag_id: str, status: str, **kwargs) -> bool:

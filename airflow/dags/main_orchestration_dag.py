@@ -13,14 +13,20 @@ from airflow.operators.dummy import DummyOperator
 from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
+# DAGConfigManager import 추가
+from common.dag_config_manager import DAGConfigManager
+
+# DAG 설정 가져오기
+dag_config_from_manager = DAGConfigManager.get_dag_config("main_orchestration_dag")
+
 # DAG configuration
 dag_config = {
     "dag_id": "main_orchestration_dag",
-    "schedule_interval": "@daily",
+    "schedule_interval": dag_config_from_manager.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     "start_date": datetime(2023, 1, 1),
     "catchup": False,
     "default_args": {"retries": 2},
-    "tags": ["orchestration", "main", "data-pipeline"],
+    "tags": dag_config_from_manager.get("tags", ["orchestration", "main", "data-pipeline"]),
 }
 
 logger = logging.getLogger(__name__)

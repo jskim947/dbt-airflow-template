@@ -13,14 +13,20 @@ from airflow.hooks.postgres_hook import PostgresHook
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 
+# DAGConfigManager import 추가
+from common.dag_config_manager import DAGConfigManager
+
+# DAG 설정 가져오기
+dag_config_from_manager = DAGConfigManager.get_dag_config("data_copy_dag")
+
 # DAG configuration
 dag_config = {
     "dag_id": "data_copy_dag",
-    "schedule_interval": "@daily",
+    "schedule_interval": dag_config_from_manager.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     "start_date": datetime(2023, 1, 1),
     "catchup": False,
     "default_args": {"retries": 2},
-    "tags": ["data-copy", "postgres", "etl"],
+    "tags": dag_config_from_manager.get("tags", ["data-copy", "postgres", "etl"]),
 }
 
 logger = logging.getLogger(__name__)

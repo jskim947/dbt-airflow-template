@@ -219,12 +219,12 @@ dbt_snapshot_dag = DbtDag(
         "full_refresh": False,
         "select": "snapshot",  # Only run snapshots
     },
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2023, 1, 1),
     catchup=False,
     dag_id="dbt_snapshot_dag",
     default_args={"retries": 2},
-    tags=["cosmos", "dbt", "snapshot"],
+    tags=dag_config.get("tags", ["cosmos", "dbt", "snapshot"]),
 )
 
 # 2. dbt Run DAG
@@ -239,12 +239,12 @@ dbt_run_dag = DbtDag(
         "full_refresh": False,
         "select": "staging marts",  # Run staging and marts models
     },
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2023, 1, 1),
     catchup=False,
     dag_id="dbt_run_dag",
     default_args={"retries": 2},
-    tags=["cosmos", "dbt", "run"],
+    tags=dag_config.get("tags", ["cosmos", "dbt", "run"]),
 )
 
 # 3. dbt Test DAG
@@ -259,12 +259,12 @@ dbt_test_dag = DbtDag(
         "full_refresh": False,
         "select": "test",  # Only run tests
     },
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2023, 1, 1),
     catchup=False,
     dag_id="dbt_test_dag",
     default_args={"retries": 2},
-    tags=["cosmos", "dbt", "test"],
+    tags=dag_config.get("tags", ["cosmos", "dbt", "test"]),
 )
 
 # 4. dbt Docs DAG
@@ -279,12 +279,12 @@ dbt_docs_dag = DbtDag(
         "full_refresh": False,
         "select": "docs",  # Generate documentation
     },
-    schedule_interval="@daily",
+    schedule_interval=dag_config.get("schedule_interval", "@daily"),  # 설정에서 가져오기
     start_date=datetime(2023, 1, 1),
     catchup=False,
     dag_id="dbt_docs_dag",
     default_args={"retries": 2},
-    tags=["cosmos", "dbt", "docs"],
+    tags=dag_config.get("tags", ["cosmos", "dbt", "docs"]),
 )
 
 # Create main orchestration DAG

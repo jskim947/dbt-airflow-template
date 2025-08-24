@@ -69,25 +69,25 @@ default_args = {
     "email": ["admin@example.com"],
 }
 
-# DAG 정의
-dag = DAG(
-    dag_id="postgres_edi_data_copy_refactored",
-    default_args=default_args,
-    description="Copy EDI data from PostgreSQL tables (Refactored)",
-    schedule_interval="@daily",
-    start_date=datetime(2024, 1, 1),
-    catchup=False,
-    tags=["postgres", "data-copy", "etl", "refactored", "edi"],
-    max_active_runs=1,
-)
-
 # 연결 ID 설정 (DAGConfigManager에서 가져오기)
 dag_config = DAGConfigManager.get_dag_config("postgres_multi_table_copy_refactored")
 SOURCE_CONN_ID = dag_config.get("source_connection", "fs2_postgres")
 TARGET_CONN_ID = dag_config.get("target_connection", "postgres_default")
 
-# EDI 테이블 설정 (공통 설정 사용)
-EDI_TABLES_CONFIG = DAGSettings.get_edi_table_configs()
+# DAG 정의
+dag = DAG(
+    dag_id="postgres_edi_data_copy_refactored",
+    default_args=default_args,
+    description=dag_config.get("description", "Copy EDI data from PostgreSQL tables (Refactored)"),
+    schedule_interval=DAGConfigManager.get_dag_schedule("postgres_multi_table_copy_refactored_edi"),
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=dag_config.get("tags", ["postgres", "data-copy", "etl", "refactored", "edi"]),
+    max_active_runs=1,
+)
+
+# EDI 테이블 설정 (DAGConfigManager 사용)
+EDI_TABLES_CONFIG = DAGConfigManager.get_table_configs("postgres_multi_table_copy_refactored_edi")
 
 
 def validate_connections(**context) -> dict[str, Any]:
@@ -146,7 +146,13 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
     """개별 EDI 테이블 데이터 복사"""
     try:
         task_id = context["task_instance"].task_id
-        table_name = table_config["source"]
+        # source_table, source 순서로 확인
+        if "source_table" in table_config:
+            table_name = table_config["source_table"]
+        elif "source" in table_config:
+            table_name = table_config["source"]
+        else:
+            raise ValueError("테이블 설정에 source_table 또는 source가 없습니다")
 
         # 모니터링 시작
         monitoring = MonitoringManager(f"EDI 테이블 복사 - {table_name}")
@@ -171,7 +177,7 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
         progress.start_step(
             "소스 테이블 스키마 조회", f"EDI 테이블 {table_name}의 스키마 정보 조회"
         )
-        source_schema = db_ops.get_table_schema(table_config["source"])
+        source_schema = db_ops.get_table_schema(table_name)
         progress.complete_step(
             "소스 테이블 스키마 조회", {"columns_count": len(source_schema["columns"])}
         )
@@ -181,26 +187,27 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
         )
 
         # 3단계: 타겟 테이블 생성 및 스키마 검증 (한 번에 처리)
+        target_table = table_config.get("target_table", table_config.get("target"))
         progress.start_step(
             "타겟 테이블 생성 및 검증",
-            f"EDI 타겟 테이블 {table_config['target']} 생성 및 스키마 검증",
+            f"EDI 타겟 테이블 {target_table} 생성 및 스키마 검증",
         )
         
         # 새로운 메서드 사용: 테이블 생성과 스키마 검증을 한 번에 처리
         verified_target_schema = copy_engine.create_target_table_and_verify_schema(
-            table_config["target"], source_schema
+            target_table, source_schema
         )
         
         progress.complete_step("타겟 테이블 생성 및 검증")
 
         monitoring.add_checkpoint(
-            "테이블 준비", f"EDI 타겟 테이블 {table_config['target']} 준비 완료"
+            "테이블 준비", f"EDI 타겟 테이블 {target_table} 준비 완료"
         )
 
         # 4단계: 데이터 복사 실행
         progress.start_step(
             "EDI 데이터 복사 실행",
-            f"EDI 테이블 {table_name}에서 {table_config['target']}로 데이터 복사",
+            f"EDI 테이블 {table_name}에서 {target_table}로 데이터 복사",
         )
         
         # EDI 데이터 복사에서 청크 방식 설정 (헬퍼 함수 사용)
@@ -230,8 +237,8 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
             
             # 스트리밍 파이프 방식 사용
             copy_result = copy_engine.copy_data_with_streaming_pipe(
-                source_table=table_config["source"],
-                target_table=table_config["target"],
+                source_table=table_name,
+                target_table=table_config.get("target_table", table_config.get("target")),
                 primary_keys=table_config.get("primary_key", []),
                 sync_mode=table_config.get("sync_mode", "incremental_sync"),
                 batch_size=table_config.get("batch_size", 10000),
@@ -241,20 +248,19 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
                 max_retries=chunk_settings["max_retries"]
             )
         else:
-            logger.info(f"EDI 기존 방식으로 데이터 복사 시작: {table_name}")
-            monitoring.add_checkpoint("EDI 복사 방식", "기존 방식 (CSV 기반)")
+            logger.info(f"EDI 스트리밍 파이프 방식으로 데이터 복사 시작: {table_name}")
+            monitoring.add_checkpoint("EDI 복사 방식", "스트리밍 파이프 (청크 방식 지원)")
             
-            # 기존 방식 사용 (청크 방식 지원)
-            copy_result = copy_engine.copy_data_with_custom_sql(
-                table_config["source"],
-                table_config["target"],
-                table_config.get("primary_key", []),
-                table_config.get("sync_mode", "incremental_sync"),
-                table_config.get("incremental_field"),
-                table_config.get("incremental_field_type"),
-                table_config.get("custom_where"),
-                table_config.get("batch_size", 10000),
-                verified_target_schema,  # 검증된 스키마 전달
+            # 스트리밍 파이프 방식 사용 (청크 방식 지원)
+            copy_result = copy_engine.copy_data_with_streaming_pipe(
+                source_table=table_name,
+                target_table=table_config.get("target_table", table_config.get("target")),
+                primary_keys=table_config.get("primary_key", []),
+                sync_mode=table_config.get("sync_mode", "incremental_sync"),
+                batch_size=table_config.get("batch_size", 10000),
+                custom_where=table_config.get("custom_where"),
+                incremental_field=table_config.get("incremental_field"),
+                incremental_field_type=table_config.get("incremental_field_type"),
                 chunk_mode=chunk_settings["chunk_mode"],
                 enable_checkpoint=chunk_settings["enable_checkpoint"],
                 max_retries=chunk_settings["max_retries"]
@@ -275,8 +281,8 @@ def copy_table_data(table_config: dict[str, Any], **context) -> dict[str, Any]:
         where_clause = table_config.get("where_clause", "changed >= '20250812'")
         
         validation_result = db_ops.validate_incremental_data_integrity(
-            table_config["source"], 
-            table_config["target"], 
+            table_name, 
+            table_config.get("target_table", table_config.get("target")), 
             where_clause
         )
         
@@ -350,12 +356,25 @@ validate_connections_task.doc_md = """
 
 for i, task in enumerate(edi_copy_tasks):
     table_config = EDI_TABLES_CONFIG[i]
+    source_name = (
+        table_config.get('source_table')
+        or table_config.get('source')
+        or table_config.get('table_name', f'table_{i}')
+    )
+    target_name = (
+        table_config.get('target_table')
+        or table_config.get('target')
+        or (
+            f"{table_config.get('target_schema', '')}.{table_config.get('table_name', '')}".strip('.')
+            if table_config.get('target_schema') or table_config.get('table_name') else 'unknown_target'
+        )
+    )
     task.doc_md = f"""
-EDI 테이블 복사 태스크 - {table_config['source']}
+EDI 테이블 복사 태스크 - {source_name}
 
 이 태스크는 다음을 수행합니다:
-1. EDI 소스 테이블 {table_config['source']} 스키마 조회
-2. 타겟 테이블 {table_config['target']} 생성 및 스키마 검증
+1. EDI 소스 테이블 {source_name} 스키마 조회
+2. 타겟 테이블 {target_name} 생성 및 스키마 검증
 3. EDI 데이터 복사 및 변환
 4. 데이터 무결성 검증
 5. 모니터링 및 진행 상황 추적
